@@ -1,0 +1,90 @@
+import logging
+import os
+import subprocess
+from pathlib import Path
+
+logger = logging.getLogger(__name__)
+
+_PERSONA_PATH = Path(__file__).parent.parent.parent / "config" / "persona.md"
+_DEFAULT_TIMEOUT = 60
+
+# Claude Code CLI 실행에 필요한 환경변수만 화이트리스트로 전달
+_ENV_WHITELIST = [
+    "PATH",
+    "HOME",
+    "USERPROFILE",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "TEMP",
+    "TMP",
+    "SYSTEMROOT",
+    "ANTHROPIC_API_KEY",
+]
+
+
+class ClaudeCodeEngine:
+    """Claude Code CLI를 headless(`-p`) 모드로 호출하는 AI 폴백 엔진.
+
+    jarvis-core의 유일한 AI 엔진. 키워드 스킬이 아무도 못 잡은
+    입력을 이 엔진에게 넘겨 자연어로 응답을 생성한다.
+    """
+
+    def __init__(self, timeout: int = _DEFAULT_TIMEOUT) -> None:
+        self._timeout = timeout
+        self._persona = self._load_persona()
+
+    def ask(self, text: str) -> str:
+        """사용자 입력을 Claude Code CLI에 전달해 응답 텍스트를 받는다.
+
+        Args:
+            text: 사용자 원문 입력.
+
+        Returns:
+            Claude의 응답 텍스트. 호출 실패/타임아웃 시 사용자에게
+            보여줄 수 있는 안전한 에러 메시지를 반환한다(예외를 던지지 않음).
+        """
+        prompt = self._build_prompt(text)
+
+        try:
+            result = subprocess.run(
+                ["claude", "-p", prompt],
+                capture_output=True,
+                text=True,
+                timeout=self._timeout,
+                env=self._build_env(),
+            )
+        except subprocess.TimeoutExpired:
+            logger.error(f"Claude Code 호출 타임아웃 ({self._timeout}초)")
+            return "응답이 너무 오래 걸려 처리하지 못했습니다."
+        except FileNotFoundError:
+            logger.error("claude 명령을 찾을 수 없습니다. PATH 설정을 확인하세요.")
+            return "AI 엔진을 찾을 수 없습니다."
+        except Exception as e:
+            logger.error(f"Claude Code 호출 오류: {e}")
+            return "AI 응답 처리 중 오류가 발생했습니다."
+
+        if result.returncode != 0:
+            logger.error(f"Claude Code 비정상 종료 (code={result.returncode}): {result.stderr}")
+            return "AI 응답을 받지 못했습니다."
+
+        response = result.stdout.strip()
+        if not response:
+            logger.warning("Claude Code 응답이 비어 있습니다.")
+            return "응답이 비어 있습니다."
+
+        return response
+
+    def _build_prompt(self, text: str) -> str:
+        if self._persona:
+            return f"{self._persona}\n\n---\n\n사용자: {text}"
+        return text
+
+    def _build_env(self) -> dict:
+        return {k: v for k, v in os.environ.items() if k in _ENV_WHITELIST}
+
+    def _load_persona(self) -> str:
+        try:
+            return _PERSONA_PATH.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            logger.warning(f"persona.md 를 찾을 수 없습니다: {_PERSONA_PATH}")
+            return ""

@@ -1,0 +1,243 @@
+.jarvis-full {
+  min-height: 100vh;
+  background: #03060c;
+  color: #e6f7fb;
+  font-family: "JetBrains Mono", "Consolas", monospace;
+  display: flex;
+  flex-direction: column;
+  padding: 16px 24px;
+  box-sizing: border-box;
+}
+
+.jarvis-full__topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  letter-spacing: 0.1em;
+  font-size: 13px;
+  color: #2dd4ee;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #2dd4ee33;
+}
+
+.jarvis-full__grid {
+  display: grid;
+  grid-template-columns: 220px 1fr 220px;
+  align-items: center;
+  gap: 16px;
+  padding: 24px 0;
+}
+
+.jarvis-full__panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  font-size: 12px;
+}
+
+.jarvis-full__panel-row {
+  display: flex;
+  justify-content: space-between;
+  color: #9fd8e3;
+}
+
+.jarvis-full__panel-row span:last-child {
+  color: #e6f7fb;
+}
+
+.jarvis-full__gauge {
+  height: 6px;
+  border-radius: 4px;
+  background: #2dd4ee22;
+  overflow: hidden;
+}
+
+.jarvis-full__gauge-fill {
+  height: 100%;
+  background: #2dd4ee;
+  box-shadow: 0 0 8px #2dd4ee;
+  transition: width 0.4s ease;
+}
+
+.jarvis-full__core {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 16px;
+}
+
+.jarvis-full__rings {
+  position: relative;
+  width: 180px;
+  height: 180px;
+}
+
+.jarvis-full__ring {
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  border: 2px solid #2dd4ee99;
+}
+
+.jarvis-full__ring--outer {
+  animation: jarvis-full-spin 6s linear infinite;
+}
+
+.jarvis-full__ring--inner {
+  inset: 22px;
+  border-style: dashed;
+  animation: jarvis-full-spin-reverse 4s linear infinite;
+}
+
+.jarvis-full__ring--listening.jarvis-full__ring--outer {
+  animation-duration: 1.6s;
+}
+.jarvis-full__ring--listening.jarvis-full__ring--inner {
+  animation-duration: 1.1s;
+}
+
+.jarvis-full__ring--processing {
+  box-shadow: 0 0 24px #2dd4eecc;
+  animation-name: jarvis-full-spin, jarvis-full-pulse-strong;
+  animation-duration: 1.5s, 0.5s;
+  animation-timing-function: linear, ease-in-out;
+  animation-iteration-count: infinite, infinite;
+}
+.jarvis-full__ring--processing.jarvis-full__ring--inner {
+  animation-name: jarvis-full-spin-reverse, jarvis-full-pulse-strong;
+  animation-duration: 1s, 0.5s;
+}
+
+.jarvis-full__ring--idle {
+  animation-duration: 9s, 0s;
+}
+
+.jarvis-full__core-text {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  text-align: center;
+  width: 140px;
+}
+
+.jarvis-full__core-main {
+  font-size: 13px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.jarvis-full__core-sub {
+  font-size: 10px;
+  letter-spacing: 0.15em;
+  color: #2dd4ee;
+  margin-top: 4px;
+}
+
+.jarvis-full__waveform {
+  display: flex;
+  align-items: flex-end;
+  gap: 3px;
+  height: 32px;
+  margin: 16px 0;
+  justify-content: center;
+}
+
+.jarvis-full__wave-bar {
+  width: 4px;
+  background: #2dd4ee;
+  border-radius: 2px;
+  height: 20%;
+  animation: jarvis-full-wave-idle 2.4s ease-in-out infinite;
+}
+
+.jarvis-full__wave-bar--listening {
+  animation: jarvis-full-wave-active 0.7s ease-in-out infinite;
+}
+
+.jarvis-full__log {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 8px 0;
+  min-height: 0;
+}
+
+.jarvis-full__bubble {
+  max-width: 60%;
+  padding: 8px 12px;
+  border-radius: 10px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.jarvis-full__bubble--user {
+  align-self: flex-end;
+  background: #2a2f36;
+  color: #e6f7fb;
+}
+
+.jarvis-full__bubble--jarvis {
+  align-self: flex-start;
+  background: #0c2730;
+  border: 1px solid #2dd4ee55;
+  color: #aef0ff;
+}
+
+@keyframes jarvis-full-spin {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes jarvis-full-spin-reverse {
+  from {
+    transform: rotate(360deg);
+  }
+  to {
+    transform: rotate(0deg);
+  }
+}
+
+@keyframes jarvis-full-pulse-strong {
+  0%,
+  100% {
+    box-shadow: 0 0 12px #2dd4ee88;
+  }
+  50% {
+    box-shadow: 0 0 32px #2dd4eeff;
+  }
+}
+
+@keyframes jarvis-full-wave-idle {
+  0%,
+  100% {
+    height: 15%;
+  }
+  50% {
+    height: 30%;
+  }
+}
+
+@keyframes jarvis-full-wave-active {
+  0%,
+  100% {
+    height: 20%;
+  }
+  50% {
+    height: 90%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .jarvis-full__ring,
+  .jarvis-full__wave-bar {
+    animation: none;
+  }
+}

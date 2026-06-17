@@ -1,0 +1,9 @@
+# Node dependencies (가장 중요)
+node_modules/
+
+# Python cache
+__pycache__/
+*.pyc
+
+# IDE / Tool configurations
+.claude/
