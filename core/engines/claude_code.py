@@ -9,7 +9,8 @@ from core import usage
 logger = logging.getLogger(__name__)
 
 _PERSONA_PATH = Path(__file__).parent.parent.parent / "config" / "persona.md"
-_DEFAULT_TIMEOUT = 60
+# 헤드리스(-p) 호출은 웹검색이 끼면 평소보다 오래 걸려서 기본 타임아웃을 늘렸다.
+_DEFAULT_TIMEOUT = 120
 
 # Claude Code CLI 실행에 필요한 환경변수만 화이트리스트로 전달
 _ENV_WHITELIST = [
@@ -23,6 +24,12 @@ _ENV_WHITELIST = [
     "SYSTEMROOT",
     "ANTHROPIC_API_KEY",
 ]
+
+# 헤드리스(-p) 모드는 터미널이 없어 권한 프롬프트를 띄울 수 없고, 사전 승인 안 된
+# 도구는 전부 자동 거부된다(예: 날씨 질문에 WebSearch를 쓰려다 거부당하는 경우).
+# 날씨/실시간 정보 조회에 필요한 웹검색만 명시적으로 허용하고, Bash/Edit/Write 등
+# 위험할 수 있는 도구는 그대로 차단 상태로 둔다.
+_ALLOWED_TOOLS = ["WebSearch", "WebFetch"]
 
 
 class ClaudeCodeEngine:
@@ -50,7 +57,15 @@ class ClaudeCodeEngine:
 
         try:
             result = subprocess.run(
-                ["claude", "-p", prompt, "--output-format", "json"],
+                [
+                    "claude",
+                    "-p",
+                    prompt,
+                    "--output-format",
+                    "json",
+                    "--allowedTools",
+                    *_ALLOWED_TOOLS,
+                ],
                 capture_output=True,
                 text=True,
                 encoding="utf-8",

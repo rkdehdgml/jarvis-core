@@ -42,7 +42,12 @@ interface WsPushPayload {
   state: JarvisState;
   lastResponse: string | null;
   timestamp: number;
+  engineStatus: boolean;
+  systemInfo: SystemInfo;
+  usageToday: number | null;
 }
+
+type HistoryApiResponse = ConversationTurn[];
 
 const API_BASE = "http://127.0.0.1:8765";
 const WS_URL = "ws://127.0.0.1:8765/ws";
@@ -68,16 +73,28 @@ export function useJarvisStatus(): UseJarvisStatusResult {
   const [status, setStatus] = useState<JarvisStatus>(initialStatus);
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // 마지막으로 처리한 상태 이벤트의 timestamp. 백엔드의 3초 주기 시스템 정보
+  // push는 새 이벤트가 없으면 같은 timestamp로 broadcaster.get_current()를
+  // 그대로 재전송하므로, 이 값이 같으면 "새 응답"이 아니라 "재전송"이다.
+  const lastEventTimestampRef = useRef<number | null>(null);
 
   const handlePush = useCallback((payload: WsPushPayload) => {
+    const isNewEvent = payload.timestamp !== lastEventTimestampRef.current;
+    lastEventTimestampRef.current = payload.timestamp;
+
     setStatus((prev) => {
       const next: JarvisStatus = {
         ...prev,
         currentState: payload.state,
         lastResponse: payload.lastResponse ?? prev.lastResponse,
+        // 채팅 상태 변화든 주기적인 시스템 정보 틱이든, push될 때마다 최신값으로
+        // 비동기 갱신한다 (페이지 로드 시 한 번만 받던 동기식 스냅샷을 대체).
+        engineStatus: payload.engineStatus,
+        systemInfo: payload.systemInfo,
+        usageToday: payload.usageToday,
       };
 
-      if (payload.state === "responded" && payload.lastResponse) {
+      if (isNewEvent && payload.state === "responded" && payload.lastResponse) {
         next.conversationLog = [
           ...prev.conversationLog,
           { role: "jarvis", text: payload.lastResponse, timestamp: payload.timestamp },
@@ -102,6 +119,11 @@ export function useJarvisStatus(): UseJarvisStatusResult {
     };
 
     ws.onclose = () => {
+      // wsRef.current가 이미 다른 소켓으로 교체된 뒤라면 이 소켓은 의도적으로
+      // 닫힌(StrictMode의 mount→unmount→remount, 혹은 재연결) "유령" 소켓이다.
+      // 그 경우 재연결을 또 걸면 같은 채팅 응답을 두 개의 살아있는 소켓이
+      // 동시에 받아 화면에 중복으로 쌓이게 된다.
+      if (wsRef.current !== ws) return;
       reconnectTimerRef.current = setTimeout(connect, RECONNECT_DELAY_MS);
     };
 
@@ -154,6 +176,17 @@ export function useJarvisStatus(): UseJarvisStatusResult {
       })
       .catch(() => {
         // 서버가 아직 안 떴을 수 있음. 초기값 유지하고 WebSocket 재연결에 맡긴다.
+      });
+
+    // 디스크에 저장된 이전 대화 기록을 불러와 새로고침/재시작에도 보이게 한다.
+    fetch(`${API_BASE}/api/history`)
+      .then((res) => res.json() as Promise<HistoryApiResponse>)
+      .then((data) => {
+        if (cancelled) return;
+        setStatus((prev) => ({ ...prev, conversationLog: data }));
+      })
+      .catch(() => {
+        // 서버가 아직 안 떴을 수 있음. 빈 기록으로 유지.
       });
 
     connect();

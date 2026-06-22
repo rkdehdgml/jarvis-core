@@ -129,9 +129,9 @@ export function JarvisFull() {
       </div>
 
       <div className="jarvis-full__log">
-        {status.conversationLog.map((turn) => (
+        {status.conversationLog.map((turn, index) => (
           <div
-            key={turn.timestamp}
+            key={`${turn.timestamp}-${turn.role}-${index}`}
             className={`jarvis-full__bubble jarvis-full__bubble--${
               turn.role === "user" ? "user" : "jarvis"
             }`}

@@ -77,9 +77,9 @@ export function JarvisMinimal() {
           {recentLog.length === 0 && (
             <div className="jarvis-minimal__log-item">대화 기록이 없습니다.</div>
           )}
-          {recentLog.map((turn) => (
+          {recentLog.map((turn, index) => (
             <div
-              key={turn.timestamp}
+              key={`${turn.timestamp}-${turn.role}-${index}`}
               className={`jarvis-minimal__log-item${
                 turn.role === "jarvis" ? " jarvis-minimal__log-item--jarvis" : ""
               }`}

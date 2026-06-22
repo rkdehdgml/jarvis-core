@@ -1,3 +1,4 @@
+import time
 from dataclasses import dataclass, field
 
 
@@ -7,6 +8,7 @@ class Turn:
     user: str
     jarvis: str
     channel: str = "voice"  # "voice" | "chat"
+    timestamp: float = field(default_factory=time.time)
 
 
 class ConversationContext:
@@ -23,9 +25,18 @@ class ConversationContext:
 
     # --- 대화 기록 ---
 
-    def add_turn(self, user: str, jarvis: str, channel: str = "voice") -> None:
-        """완료된 대화 턴을 기록한다."""
-        self._history.append(Turn(user=user, jarvis=jarvis, channel=channel))
+    def add_turn(
+        self, user: str, jarvis: str, channel: str = "voice", timestamp: float | None = None
+    ) -> None:
+        """완료된 대화 턴을 기록한다.
+
+        timestamp를 지정하면(디스크에서 복원하는 경우 등) 그 값을 그대로 쓰고,
+        생략하면 Turn의 default_factory가 현재 시각을 채운다.
+        """
+        kwargs = {"user": user, "jarvis": jarvis, "channel": channel}
+        if timestamp is not None:
+            kwargs["timestamp"] = timestamp
+        self._history.append(Turn(**kwargs))
         if len(self._history) > self._max_history:
             self._history.pop(0)
 

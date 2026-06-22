@@ -26,6 +26,7 @@ from core.registry import SkillRegistry
 from core.router import Router
 from core.status_events import StatusEvent, broadcaster
 from core.usage import get_today_percent
+from ui import chat_history
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,17 @@ _dispatcher = Dispatcher(_registry)
 _chat_context = ConversationContext()
 _clients: set[WebSocket] = set()
 _loop: asyncio.AbstractEventLoop | None = None
+
+# 채팅/음성 상태 변화가 없어도 엔진/CPU/메모리/사용량을 이 주기로 비동기 push한다.
+_SYSTEM_INFO_INTERVAL_SECONDS = 3
+
+for _turn in chat_history.load_history():
+    _chat_context.add_turn(
+        user=_turn["user"],
+        jarvis=_turn["jarvis"],
+        channel=_turn.get("channel", "chat"),
+        timestamp=_turn.get("timestamp"),
+    )
 
 
 class ChatRequest(BaseModel):
@@ -46,11 +58,26 @@ class ChatResponse(BaseModel):
     success: bool
 
 
+class HistoryTurn(BaseModel):
+    role: str
+    text: str
+    timestamp: float
+
+
 def _event_to_dict(event: StatusEvent) -> dict:
+    """상태 이벤트를 WebSocket 페이로드로 변환한다.
+
+    엔진/CPU/메모리/사용량은 채팅 상태와 무관하게 매번 새로 측정해 함께 보낸다.
+    프론트엔드가 페이지 로드 시 한 번만 동기적으로 받던 값을, 모든 push마다
+    (상태 변화든 주기적 틱이든) 최신값으로 비동기 갱신할 수 있게 하기 위함.
+    """
     return {
         "state": event.state,
         "lastResponse": event.last_response,
         "timestamp": event.timestamp,
+        "engineStatus": _check_engine(),
+        "systemInfo": _system_info(),
+        "usageToday": get_today_percent(),
     }
 
 
@@ -89,13 +116,22 @@ def _on_status_event(event: StatusEvent) -> None:
     asyncio.run_coroutine_threadsafe(_broadcast(event), _loop)
 
 
+async def _system_info_loop() -> None:
+    """채팅/음성 상태 변화가 없을 때도 엔진/CPU/메모리/사용량을 주기적으로 push한다."""
+    while True:
+        await asyncio.sleep(_SYSTEM_INFO_INTERVAL_SECONDS)
+        await _broadcast(broadcaster.get_current())
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     global _loop
     _loop = asyncio.get_running_loop()
     broadcaster.subscribe(_on_status_event)
+    system_info_task = asyncio.create_task(_system_info_loop())
     logger.info("UI 서버: 상태 브로드캐스터 구독 시작")
     yield
+    system_info_task.cancel()
     broadcaster.unsubscribe(_on_status_event)
 
 
@@ -133,10 +169,7 @@ def get_status() -> dict:
     event = broadcaster.get_current()
     return {
         **_event_to_dict(event),
-        "engineStatus": _check_engine(),
         "activeSkills": [s.name for s in _registry.get_all_skills()],
-        "systemInfo": _system_info(),
-        "usageToday": get_today_percent(),
     }
 
 
@@ -146,6 +179,17 @@ def _handle_chat(text: str) -> ChatResponse:
     result = _dispatcher.dispatch(skill, event.text, _chat_context, channel=event.channel)
     # Dispatcher가 broadcaster.emit(state="responded", ...)을 이미 호출하므로
     # 연결된 모든 WebSocket 클라이언트에 동일한 응답이 자동으로 push된다.
+
+    last_turn = _chat_context.get_history(1)[0]
+    chat_history.append_turn(
+        {
+            "user": last_turn.user,
+            "jarvis": last_turn.jarvis,
+            "channel": last_turn.channel,
+            "timestamp": last_turn.timestamp,
+        }
+    )
+
     return ChatResponse(speech=result.speech, success=result.success)
 
 
@@ -153,3 +197,16 @@ def _handle_chat(text: str) -> ChatResponse:
 async def post_chat(req: ChatRequest) -> ChatResponse:
     """채팅 입력을 받아 처리한다. channel="chat"이므로 TTS는 호출되지 않는다."""
     return await asyncio.to_thread(_handle_chat, req.text)
+
+
+@app.get("/api/history", response_model=list[HistoryTurn])
+def get_history() -> list[HistoryTurn]:
+    """디스크에서 복원된(서버 재시작에도 살아남는) 대화 기록을 반환한다.
+
+    프론트엔드가 페이지 로드 시 한 번 불러와 conversationLog 초기값으로 쓴다.
+    """
+    turns: list[HistoryTurn] = []
+    for turn in _chat_context.get_history():
+        turns.append(HistoryTurn(role="user", text=turn.user, timestamp=turn.timestamp))
+        turns.append(HistoryTurn(role="jarvis", text=turn.jarvis, timestamp=turn.timestamp))
+    return turns
