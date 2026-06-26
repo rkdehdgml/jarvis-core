@@ -77,6 +77,26 @@ def run_command(command_id: str, **kwargs) -> CommandResult:
     if spec.bridge == "ffmpeg":
         return _run_ffmpeg(args, spec.timeout)
 
+    if spec.bridge == "shell":
+        # os.startfile() → ShellExecuteW: URL·파일·경로를 OS 기본 핸들러로 연다.
+        # subprocess + explorer.exe 방식은 exit code 1을 반환해 실패로 오판되므로
+        # startfile을 직접 사용한다.
+        if not args:
+            return CommandResult(
+                ok=False,
+                stdout="",
+                stderr=f"{command_id}에 열 대상이 지정되지 않았습니다.",
+                exit_code=-1,
+            )
+        try:
+            os.startfile(args[0])
+            return CommandResult(ok=True, stdout="", stderr="", exit_code=0)
+        except OSError as exc:
+            return CommandResult(ok=False, stdout="", stderr=str(exc), exit_code=-1)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("shell 실행 중 예상치 못한 오류")
+            return CommandResult(ok=False, stdout="", stderr=str(exc), exit_code=-1)
+
     return CommandResult(
         ok=False,
         stdout="",

@@ -14,9 +14,8 @@ from commands.registry import CommandSpec
 SPECS: dict[str, CommandSpec] = {
     "BROWSER_OPEN_URL": CommandSpec(
         command_id="BROWSER_OPEN_URL",
-        description="기본 브라우저로 URL을 연다",
-        bridge="exe",
-        binary="explorer.exe",
+        description="기본 브라우저·기본 핸들러로 URL 또는 파일 경로를 연다",
+        bridge="shell",
         build_args=lambda kw: [kw["url"]],
     ),
 }

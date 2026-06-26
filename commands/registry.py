@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Literal
 
-BridgeKind = Literal["exe", "powershell", "ffmpeg"]
+BridgeKind = Literal["exe", "powershell", "ffmpeg", "shell"]
 
 
 @dataclass(frozen=True)

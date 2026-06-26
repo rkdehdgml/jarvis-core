@@ -10,9 +10,16 @@ from commands.windows_bridge import run_command, _run_exe, _run_powershell
 
 
 def main() -> None:
-    # 1) 초기 COMMAND_MAP은 비어 있어야 한다 (아직 어떤 spec도 등록 안 됨).
-    assert COMMAND_MAP == {}, f"초기 COMMAND_MAP이 비어 있지 않음: {COMMAND_MAP}"
-    print("[1] 초기 COMMAND_MAP 빈 dict 확인")
+    # 1) registry.py는 임포트 시점에 모든 spec을 자동 등록한다 — 기본 command_id가 전부 있어야 한다.
+    expected = {
+        "POWER_SHUTDOWN", "POWER_RESTART", "POWER_SLEEP",
+        "BROWSER_OPEN_URL",
+        "SYSTEM_STATUS_QUERY",
+        "CAPTURE_SCREENSHOT", "CAPTURE_SCREEN_RECORD", "CAPTURE_VOICE_RECORD", "CAPTURE_CAMERA",
+    }
+    missing = expected - COMMAND_MAP.keys()
+    assert not missing, f"기본 command_id 누락: {missing}"
+    print(f"[1] 기본 COMMAND_MAP 등록 확인 ({len(COMMAND_MAP)}개)")
 
     # 2) 가짜 CommandSpec 2개 등록 → COMMAND_MAP에 정상 추가.
     spec_a = CommandSpec(

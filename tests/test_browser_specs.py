@@ -11,8 +11,9 @@ def main() -> None:
         register(browser_specs.SPECS)
 
     spec = COMMAND_MAP["BROWSER_OPEN_URL"]
-    assert spec.bridge == "exe", "bridge는 exe여야 한다(PowerShell 인젝션 회피)"
-    assert spec.binary == "explorer.exe", "binary는 explorer.exe여야 한다"
+    # shell bridge: os.startfile() 사용 — explorer.exe exit code 1 오판 문제 해결
+    assert spec.bridge == "shell", "bridge는 shell이어야 한다(os.startfile 직접 호출)"
+    assert spec.binary is None, "shell bridge는 binary를 사용하지 않는다"
     assert spec.build_args({"url": "https://example.com"}) == ["https://example.com"]
 
     print("test_browser_specs 통과")
