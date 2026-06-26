@@ -388,3 +388,930 @@ def _run_ffmpeg(args: list[str], timeout: int) -> CommandResult: ...
    일정 기능을 로컬 JSON으로만 둘지 Google Calendar API 연동까지 포함할지?
 10. **wikipedia 패키지의 유지보수 상태**: "deprecated 라이브러리 금지" 원칙에 따라, 업데이트가 뜸한
     `wikipedia` 패키지 대신 MediaWiki REST API를 `requests`로 직접 호출하는 방식으로 대체할지?
+
+---
+
+## 부록 A. PC 화면 제어 에이전트 설계 (2026-06-26 추가)
+
+> 이 부록은 기존 6개 카테고리 확장과 별개로, **PC 화면을 직접 제어하는 멀티스텝 에이전트** 기능을
+> 추가하기 위한 설계다. 구현 대상은 4개 파일이다.
+
+### A.0 새 파일 목록
+
+```
+core/
+└── engines/
+    └── ollama_engine.py          # [신규] Ollama 로컬 LLM 엔진 (GroqEngine 인터페이스 준수)
+
+skills/
+├── skill_ai_chat.py              # [수정] Groq→Ollama 자동 폴백 로직 추가
+├── agent_tools/
+│   └── screen_tool.py            # [신규] 8개 화면 제어 도구 함수
+└── skill_screen_agent.py         # [신규] 화면 제어 에이전트 스킬 (Groq tool-calling 루프)
+```
+
+---
+
+### A.1 `core/engines/ollama_engine.py` 명세
+
+**목적**: Ollama 로컬 서버의 OpenAI 호환 엔드포인트를 `requests`로 직접 호출해 `GroqEngine`과
+동일한 `ask/generate/describe` 인터페이스를 제공한다. `openai` SDK는 사용하지 않는다.
+
+**설계 근거**:
+- `requests`는 이미 `requirements.txt`에 있다 — 추가 의존성 없음.
+- `openai` SDK를 쓰면 패키지 크기와 초기화 비용이 늘지만, OpenAI-호환 JSON 스펙은
+  `requests` + `json` 수준에서 완전히 처리 가능하다.
+- timeout 기본값 120초 (로컬 추론은 Groq API보다 느림).
+
+```python
+# core/engines/ollama_engine.py — 시그니처/스텁 수준
+
+import logging
+import os
+import re
+from pathlib import Path
+
+import requests
+from dotenv import load_dotenv
+
+load_dotenv()
+logger = logging.getLogger(__name__)
+
+_PERSONA_PATH = Path(__file__).parent.parent.parent / "config" / "persona.md"
+
+_DEFAULT_HOST  = "localhost:11434"   # OLLAMA_HOST 환경변수로 재정의
+_DEFAULT_MODEL = "qwen2.5:7b"        # OLLAMA_MODEL 환경변수로 재정의
+_DEFAULT_TIMEOUT = 120               # 로컬 추론 지연 감안, 초 단위
+_FOREIGN_SCRIPT = re.compile("[一-鿿㐀-䶿぀-ゟ゠-ヿ]")  # groq_engine.py와 동일
+
+
+class OllamaEngine:
+    """Ollama 로컬 서버를 호출하는 AI 엔진. GroqEngine과 동일한 인터페이스를 따른다."""
+
+    def __init__(self) -> None:
+        self._host  = os.getenv("OLLAMA_HOST",  _DEFAULT_HOST)
+        self._model = os.getenv("OLLAMA_MODEL", _DEFAULT_MODEL)
+        self._persona = self._load_persona()
+        # base_url: http:// 스킴이 없으면 자동 추가
+        if not self._host.startswith("http"):
+            self._base_url = f"http://{self._host}"
+        else:
+            self._base_url = self._host
+
+    # ── 공개 인터페이스 (GroqEngine과 동일) ─────────────────────────────────
+
+    def ask(self, text: str) -> str:
+        """사용자 입력을 Ollama에 전달해 응답 텍스트를 반환한다.
+        persona.md를 system 메시지로 고정한다. 실패 시 예외 대신 한국어 에러 문자열 반환."""
+        return self._complete(text, system=self._persona)
+
+    def generate(self, prompt: str, system: str | None = None) -> str:
+        """persona.md에 system을 덧붙여 호출한다. GroqEngine.generate()와 동일한 규약."""
+        if system and self._persona:
+            combined = f"{self._persona}\n\n{system}"
+        else:
+            combined = system or self._persona
+        return self._complete(prompt, system=combined)
+
+    def describe(self) -> dict:
+        """ui/server.py가 읽는 엔진 식별 정보. usagePercent는 항상 0 (로컬, 할당량 없음)."""
+        return {
+            "provider": "Ollama",
+            "model": self._model,
+            "connected": self._is_reachable(),
+            "usagePercent": 0,
+        }
+
+    # ── 내부 구현 ────────────────────────────────────────────────────────────
+
+    def _complete(self, text: str, system: str) -> str:
+        """실제 HTTP 요청. 모든 예외를 잡아 한국어 에러 메시지로 변환한다."""
+        messages = []
+        if system:
+            messages.append({"role": "system", "content": system})
+        messages.append({"role": "user", "content": text})
+
+        try:
+            resp = requests.post(
+                f"{self._base_url}/v1/chat/completions",
+                json={
+                    "model":       self._model,
+                    "messages":    messages,
+                    "temperature": 0.7,
+                    "max_tokens":  1024,
+                },
+                timeout=_DEFAULT_TIMEOUT,
+            )
+            resp.raise_for_status()
+        except requests.ConnectionError:
+            logger.error("Ollama 서버에 연결할 수 없습니다.")
+            return "Ollama 서버에 연결할 수 없습니다. 서버가 실행 중인지 확인해주세요."
+        except requests.Timeout:
+            logger.error("Ollama 응답 타임아웃")
+            return "Ollama 응답 시간이 초과됐습니다."
+        except requests.HTTPError as e:
+            logger.error(f"Ollama HTTP 오류: {e}")
+            return f"Ollama 오류: {e}"
+        except Exception as e:
+            logger.error(f"Ollama 엔진 오류: {e}")
+            return f"Ollama 엔진 오류: {e}"
+
+        content: str = resp.json()["choices"][0]["message"]["content"] or ""
+
+        # 한자/가나 잔류 시 제거 (groq_engine.py와 동일한 후처리)
+        if _FOREIGN_SCRIPT.search(content):
+            logger.warning("Ollama 응답에 한자/가나 포함 — 제거 후 반환")
+            content = _FOREIGN_SCRIPT.sub("", content)
+            content = re.sub(r"\s+", " ", content)
+
+        return content.strip() or "응답이 비어 있습니다."
+
+    def _is_reachable(self) -> bool:
+        """GET /api/tags 로 서버 생존 여부를 확인한다. 실패 시 False."""
+        try:
+            r = requests.get(f"{self._base_url}/api/tags", timeout=3)
+            return r.status_code == 200
+        except Exception:
+            return False
+
+    def _load_persona(self) -> str:
+        try:
+            return _PERSONA_PATH.read_text(encoding="utf-8").strip()
+        except FileNotFoundError:
+            logger.warning(f"persona.md를 찾을 수 없습니다: {_PERSONA_PATH}")
+            return ""
+```
+
+---
+
+### A.2 `skills/skill_ai_chat.py` 수정 명세 (Groq → Ollama 폴백)
+
+**핵심 제약**: `core/engines/groq_engine.py`는 수정하지 않는다. `GroqEngine._complete()`는
+`RateLimitError`를 내부에서 잡아 한국어 에러 문자열(`"Groq API 요청 한도를 초과했습니다. ..."`)로
+반환하므로, 스킬 레벨에서는 **응답 문자열 검사**로 한도 초과를 감지한다.
+
+**검출 방식 선택 근거**:
+- `groq` SDK의 `RateLimitError`를 스킬 레벨에서 직접 잡으려면 `GroqEngine._complete()`의 except
+  블록을 수정하거나, 스킬이 `groq` SDK에 직접 의존해야 한다. 전자는 frozen 위반, 후자는 엔진 캡슐화
+  파괴이므로 채택하지 않는다.
+- 문자열 감지는 `groq_engine.py`의 에러 메시지 변경 시 깨질 수 있는 약점이 있다. 이 취약점을
+  완화하기 위해 상수 `_GROQ_RATE_LIMIT_SIGNAL`을 한 곳에 두고, 에러 메시지 변경 시 상수만
+  갱신하면 되도록 설계한다.
+
+**변경 전후 비교**:
+
+```python
+# 변경 전 (현재)
+from core.engines.groq_engine import GroqEngine as Engine
+
+class AiChatSkill(Skill):
+    def __init__(self) -> None:
+        self._engine = Engine()
+
+    def execute(self, text: str, context: dict) -> SkillResult:
+        response = self._engine.ask(text)
+        return SkillResult(speech=response, success=True)
+```
+
+```python
+# 변경 후 — 함수 시그니처/구조 수준 스텁
+
+import logging
+from core.skill_base import Skill, SkillResult
+# [ROLLBACK] from core.engines.claude_code import ClaudeCodeEngine as _GroqCls
+from core.engines.groq_engine import GroqEngine as _GroqCls
+from core.engines.ollama_engine import OllamaEngine as _OllamaCls
+
+logger = logging.getLogger(__name__)
+
+# groq_engine.py 의 RateLimitError 응답 문자열 — 변경 시 이 상수만 갱신
+_GROQ_RATE_LIMIT_SIGNAL = "Groq API 요청 한도를 초과했습니다"
+
+
+class AiChatSkill(Skill):
+    name        = "ai_chat"
+    description = "다른 스킬이 처리하지 못한 자연어 요청을 AI로 응답한다"
+    triggers    = []
+    examples    = []
+
+    def __init__(self) -> None:
+        self._groq   = _GroqCls()
+        self._ollama: _OllamaCls | None = None
+        self._use_ollama: bool = False   # 세션 내 전환 후 복원 안 함
+
+    # ui/server.py의 _engine_descriptor()가 self._engine.describe()를 호출하므로
+    # property로 현재 활성 엔진을 노출한다.
+    @property
+    def _engine(self):
+        if self._use_ollama:
+            if self._ollama is None:
+                self._ollama = _OllamaCls()
+            return self._ollama
+        return self._groq
+
+    def can_handle(self, intent: str, text: str) -> float:
+        return 0.1   # 항상 낮은 점수 — Router 임계값 미달, 폴백 전용
+
+    def execute(self, text: str, context: dict) -> SkillResult:
+        response = self._engine.ask(text)
+
+        # Groq 한도 초과 감지 → Ollama로 전환 후 즉시 재시도
+        if not self._use_ollama and _GROQ_RATE_LIMIT_SIGNAL in response:
+            logger.warning("Groq 일일 한도 소진 — 이 세션은 Ollama로 전환합니다.")
+            self._use_ollama = True
+            response = self._engine.ask(text)   # _engine property가 이제 Ollama 반환
+
+        return SkillResult(speech=response, success=True)
+```
+
+**`_engine` property 도입 이유**: `ui/server.py`의 `_engine_descriptor()`는
+`skill._engine.describe()`를 호출해 대시보드 엔진 패널을 채운다. property로 현재 활성 엔진
+객체를 동적으로 반환하면 Groq→Ollama 전환 시 대시보드에도 자동으로 반영된다.
+
+---
+
+### A.3 `skills/agent_tools/screen_tool.py` 명세
+
+**목적**: 8개 화면 제어 도구 함수. `skill_screen_agent.py`의 tool-calling 루프가 호출하며,
+`agent_tools/` 패키지의 기존 관례(`{"ok": bool, "data": ..., "error": str}` 반환, 예외 미방출)를
+그대로 따른다.
+
+**의존 패키지** (신규 설치 필요):
+- `pyautogui>=0.9.54` — 마우스/키보드 제어
+- `pytesseract>=0.3.10` — OCR (Tesseract 바이너리 별도 설치 필요 — A.8 참고)
+- `Pillow>=10.0` — 스크린샷 이미지 처리 (pyautogui 의존성으로 보통 함께 설치됨)
+
+이미 `requirements.txt`에 있어 재사용 가능한 패키지:
+- `pyperclip>=1.8.2` — 클립보드 (한국어 텍스트 입력용)
+- `pygetwindow>=0.0.9` — 창 관리
+
+```python
+# skills/agent_tools/screen_tool.py — 시그니처/스텁 수준
+
+"""PC 화면 제어 도구 8개.
+
+모든 함수는 {"ok": bool, "data": ..., "error": str} 형식을 반환하고 예외를 던지지 않는다.
+skill_screen_agent.py의 Groq/Ollama tool-calling 루프에서 호출된다.
+"""
+import logging
+import subprocess
+import webbrowser
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+# ── pyautogui 안전 설정 (모듈 최상단에서 한 번만) ──────────────────────────
+# import는 함수 내부에서 지연(lazy) — pyautogui가 없어도 나머지 앱이 로드되도록
+# 단, 설정은 최초 import 시점에 적용되어야 하므로 _get_pyautogui() 헬퍼로 처리
+def _get_pyautogui():
+    """pyautogui를 지연 임포트하고 안전 설정을 적용한다."""
+    import pyautogui
+    pyautogui.FAILSAFE = True   # 마우스를 화면 모서리로 이동하면 AbortException 발생
+    pyautogui.PAUSE    = 0.2    # 각 액션 사이 최소 0.2초 대기 (빠른 연속 동작 방지)
+    return pyautogui
+
+
+# ① screenshot_read ─────────────────────────────────────────────────────────
+def screenshot_read() -> dict[str, Any]:
+    """현재 화면을 캡처하고 OCR로 텍스트 요소와 좌표를 반환한다.
+
+    Returns:
+        data: {"elements": [{"id": int, "text": str, "x": int, "y": int,
+                              "w": int, "h": int}, ...]}
+        신뢰도 60 미만 OCR 결과는 제외된다.
+    """
+    ...
+
+
+# ② mouse_click ─────────────────────────────────────────────────────────────
+def mouse_click(x: int, y: int, button: str = "left") -> dict[str, Any]:
+    """지정 좌표를 클릭한다.
+
+    Args:
+        x, y:   화면 좌표 (픽셀). 화면 범위 밖이면 ok=False.
+        button: "left" | "right" | "middle"
+    """
+    ...
+
+
+# ③ keyboard_type ───────────────────────────────────────────────────────────
+def keyboard_type(text: str) -> dict[str, Any]:
+    """텍스트를 입력한다. 한국어 포함 모든 텍스트에 클립보드+Ctrl+V 방식을 사용한다.
+
+    주의: pyautogui.write()는 한국어를 입력하지 못한다(ASCII 전용). 이 함수는
+    pyperclip.copy(text) → pyautogui.hotkey('ctrl', 'v') 로 항상 처리한다.
+    """
+    ...
+
+
+# ④ keyboard_key ────────────────────────────────────────────────────────────
+def keyboard_key(key: str) -> dict[str, Any]:
+    """단일 키 또는 복합 키를 입력한다.
+
+    Args:
+        key: "enter", "tab", "esc", "ctrl+c", "ctrl+v", "alt+f4" 등.
+             "+" 구분자로 복합 키를 표현한다.
+    """
+    ...
+
+
+# ⑤ mouse_scroll ────────────────────────────────────────────────────────────
+def mouse_scroll(
+    direction: str,
+    amount: int = 3,
+    x: int | None = None,
+    y: int | None = None,
+) -> dict[str, Any]:
+    """마우스 휠을 스크롤한다.
+
+    Args:
+        direction: "up" 또는 "down"
+        amount:    클릭 수 (pyautogui clicks 인자). 기본 3.
+        x, y:      스크롤할 위치. None이면 현재 포인터 위치.
+    """
+    ...
+
+
+# ⑥ get_windows ─────────────────────────────────────────────────────────────
+def get_windows() -> dict[str, Any]:
+    """열려 있는 창 목록을 반환한다.
+
+    Returns:
+        data: [{"title": str, "x": int, "y": int, "w": int, "h": int}, ...]
+        빈 제목(title="")의 창은 제외한다.
+    """
+    ...
+
+
+# ⑦ focus_window ────────────────────────────────────────────────────────────
+def focus_window(title: str) -> dict[str, Any]:
+    """제목이 일치하는 창을 앞으로 가져온다.
+
+    부분 일치(title이 창 제목의 substring)를 지원한다.
+    일치하는 창이 없으면 ok=False.
+    """
+    ...
+
+
+# ⑧ open_app ────────────────────────────────────────────────────────────────
+def open_app(target: str) -> dict[str, Any]:
+    """URL이면 기본 브라우저로 열고, 앱 이름/경로면 subprocess로 실행한다.
+
+    URL 판별: target이 "http://", "https://"로 시작하거나 "www."를 포함하면 URL.
+    앱 실행: subprocess.Popen(target, shell=True) — shell=True로 PATH 탐색 허용.
+    """
+    ...
+```
+
+**각 함수의 핵심 구현 포인트** (로직 힌트, 완전한 구현은 구현자 에이전트가 담당):
+
+| 함수 | 핵심 포인트 |
+|---|---|
+| `screenshot_read` | `pytesseract.image_to_data(img, lang='kor+eng', output_type=Output.DICT)` → `conf > 60`인 행만 필터링. `left`, `top`, `width`, `height` 컬럼이 좌표 소스. 같은 블록(`block_num`)에 속한 단어들을 하나의 요소로 묶으면 노이즈가 줄어든다. |
+| `keyboard_type` | `pyperclip.copy(text)` 후 `pyautogui.hotkey('ctrl', 'v')`. 한국어뿐 아니라 특수문자도 안전하게 처리된다. `pyautogui.PAUSE` 덕분에 클립보드가 세팅되기 전에 붙여넣기가 실행되는 타이밍 문제를 최소화할 수 있으나, 필요 시 `time.sleep(0.05)` 추가 고려. |
+| `keyboard_key` | `key.split('+')` → 요소가 1개면 `pyautogui.press()`, 2개 이상이면 `pyautogui.hotkey(*parts)`. "enter"→"return" 등 pyautogui 키 이름 별칭 매핑 테이블을 두는 것이 안전하다. |
+| `focus_window` | `pygetwindow.getWindowsWithTitle(title)` + 부분 일치 fallback: `[w for w in pygetwindow.getAllWindows() if title.lower() in w.title.lower()]`. `.activate()`는 일부 앱에서 `pygetwindow.PyGetWindowException`을 던질 수 있으므로 try-except 필수. |
+| `open_app` (앱) | `subprocess.Popen(target, shell=True)` 실행 후 `Popen` 객체만 저장하고 완료를 기다리지 않는다 (`wait()` 미호출). 에러 발생 여부는 `OSError`로 잡는다. |
+
+---
+
+### A.4 `skills/skill_screen_agent.py` 명세
+
+**목적**: 화면 캡처→분석→클릭/타이핑 등을 자동으로 수행하는 멀티스텝 에이전트.
+`skill_agent.py` (웹 조사 에이전트)의 구조를 그대로 따르되, 도구 셋이 screen_tool의 8개 함수로
+교체되고, **Groq RateLimitError 발생 시 루프 내에서 즉시 Ollama로 전환**한다.
+
+**Groq→Ollama 루프 내 전환 전략**:
+- `skill_agent.py`에서는 Groq SDK 예외가 루프 밖(`_run_agent()` 전체)에서 처리된다.
+- 이 스킬에서는 루프 내부에서 `groq.RateLimitError`를 직접 잡아 `use_ollama = True`로
+  플래그를 세우고 즉시 Ollama로 재시도한다.
+- Ollama는 `requests`로 `/v1/chat/completions`를 호출한다 (OpenAI-호환 형식).
+  Groq SDK 응답 객체(`.choices[0].message.tool_calls`)와 Ollama JSON 응답
+  (`["choices"][0]["message"]["tool_calls"]`)은 구조가 다르므로, 이를 통일하는
+  내부 메서드 `_call_llm()`이 양쪽을 정규화한다.
+
+```python
+# skills/skill_screen_agent.py — 시그니처/스텁 수준
+
+"""화면 제어 에이전트. Groq tool-calling 루프 + Ollama 자동 폴백."""
+import json
+import logging
+import os
+import re
+
+from dotenv import load_dotenv
+from groq import Groq, RateLimitError
+
+from core.skill_base import Skill, SkillResult
+from skills.agent_tools import reporter_tool
+from skills.agent_tools import screen_tool
+
+load_dotenv()
+logger = logging.getLogger(__name__)
+
+_FOREIGN_SCRIPT = re.compile("[一-鿿㐀-䶿぀-ゟ゠-ヿ]")
+_MODEL_GROQ   = "llama-3.3-70b-versatile"
+_MAX_TURNS    = 20
+_MAX_TOKENS   = 4096
+_TIMEOUT_GROQ = 60
+_TIMEOUT_OLLAMA = 120
+_MAX_TOOL_OUTPUT = 4000
+
+# ── 트리거 상수 ────────────────────────────────────────────────────────────
+_TRIGGERS_VERY_STRONG = ["화면 제어", "화면 에이전트", "직접 제어"]   # 0.95
+_TRIGGERS_STRONG      = ["화면에서", "화면으로"]                       # + 동사 있으면 0.9
+_STRONG_VERBS         = ["해줘", "해봐", "수집", "찾아", "클릭"]
+_TRIGGERS_COMBO_OPEN  = ["켜서", "열어서"]                             # 조합: 0.85
+_TRIGGERS_COMBO_ACT   = ["수집", "저장"]
+
+_SYSTEM_PROMPT = (
+    "You are Jarvis, a personal AI assistant controlling the user's PC screen.\n\n"
+    "Workflow:\n"
+    "1. Use 'report' first to announce what you are about to do.\n"
+    "2. Use 'screenshot_read' to see on-screen text elements and their coordinates.\n"
+    "3. Use 'mouse_click', 'keyboard_type', 'keyboard_key', 'mouse_scroll' to interact.\n"
+    "4. Use 'get_windows' and 'focus_window' to manage open windows.\n"
+    "5. Use 'open_app' to launch apps or URLs.\n"
+    "6. Use 'report' after each major step to update the user.\n\n"
+    "Respond to the user in friendly, natural Korean. "
+    "Always confirm with 'report' before clicking or typing."
+)
+
+# Groq tool-calling 형식 정의 — screen_tool 8개 + report
+_TOOLS: list[dict] = [
+    {
+        "type": "function",
+        "function": {
+            "name": "screenshot_read",
+            "description": "현재 화면을 캡처하고 OCR로 텍스트 요소와 좌표를 반환한다",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "mouse_click",
+            "description": "지정 좌표를 마우스로 클릭한다",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "x":      {"type": "integer", "description": "X 좌표 (픽셀)"},
+                    "y":      {"type": "integer", "description": "Y 좌표 (픽셀)"},
+                    "button": {"type": "string",  "description": "left | right | middle"},
+                },
+                "required": ["x", "y"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "keyboard_type",
+            "description": "텍스트를 입력한다 (한국어 포함)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "description": "입력할 텍스트"},
+                },
+                "required": ["text"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "keyboard_key",
+            "description": "특수키 또는 단축키를 누른다 (예: enter, ctrl+c, alt+f4)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "key": {"type": "string", "description": "키 이름 또는 조합 (+ 구분자)"},
+                },
+                "required": ["key"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "mouse_scroll",
+            "description": "마우스 휠을 스크롤한다",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "direction": {"type": "string",  "description": "up 또는 down"},
+                    "amount":    {"type": "integer", "description": "스크롤 클릭 수 (기본 3)"},
+                    "x":         {"type": "integer", "description": "스크롤 위치 X (선택)"},
+                    "y":         {"type": "integer", "description": "스크롤 위치 Y (선택)"},
+                },
+                "required": ["direction"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_windows",
+            "description": "현재 열린 창 목록과 위치/크기를 반환한다",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "focus_window",
+            "description": "제목으로 창을 찾아 포커스를 맞춘다",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "창 제목 (부분 일치 허용)"},
+                },
+                "required": ["title"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "open_app",
+            "description": "앱 이름/경로 또는 URL을 열다",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target": {"type": "string", "description": "앱 이름, 경로, 또는 URL"},
+                },
+                "required": ["target"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "report",
+            "description": "현재 진행 상황을 사용자에게 보고한다",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "message": {"type": "string", "description": "보고 내용"},
+                },
+                "required": ["message"],
+            },
+        },
+    },
+]
+
+
+class ScreenAgentSkill(Skill):
+    """PC 화면 제어 에이전트 스킬 (Groq tool-calling + Ollama 폴백)."""
+
+    name        = "screen_agent"
+    description = "화면을 직접 제어해 클릭·입력·창 관리 등 멀티스텝 작업을 자동 수행한다"
+    triggers    = ["화면 제어", "화면 에이전트", "직접 제어", "화면으로"]
+    examples    = [
+        "화면 에이전트로 크롬 열어서 유튜브 검색해줘",
+        "화면 제어로 메모장에 안녕하세요 입력해줘",
+        "직접 제어해서 바탕화면 스크린샷 찍어줘",
+    ]
+
+    def can_handle(self, intent: str, text: str) -> float:
+        if any(t in text for t in _TRIGGERS_VERY_STRONG):
+            return 0.95
+        if any(t in text for t in _TRIGGERS_STRONG):
+            if any(v in text for v in _STRONG_VERBS):
+                return 0.9
+        if any(o in text for o in _TRIGGERS_COMBO_OPEN):
+            if any(a in text for a in _TRIGGERS_COMBO_ACT):
+                return 0.85
+        return 0.0
+
+    def execute(self, text: str, context: dict) -> SkillResult:
+        try:
+            from voice import tts as _tts
+            reporter_tool.set_callback(_tts.speak)
+        except Exception:
+            reporter_tool.set_callback(None)
+
+        api_key = os.getenv("GROQ_API_KEY")
+        if not api_key:
+            return SkillResult(
+                speech="GROQ API 키가 없습니다. .env 파일에 GROQ_API_KEY를 설정해주세요.",
+                success=False,
+            )
+
+        answer = self._run_agent(api_key, text)
+        return SkillResult(speech=answer, success=True, data={"task": text})
+
+    # ── 에이전트 루프 ────────────────────────────────────────────────────────
+
+    def _run_agent(self, api_key: str, task: str) -> str:
+        """Groq tool-calling 루프. RateLimitError 발생 시 Ollama로 전환한다."""
+        groq_client = Groq(api_key=api_key)
+        use_ollama  = False
+
+        messages: list[dict] = [
+            {"role": "system", "content": _SYSTEM_PROMPT},
+            {"role": "user",   "content": task},
+        ]
+
+        for turn in range(_MAX_TURNS):
+            try:
+                msg = self._call_llm(groq_client, messages, use_ollama)
+            except RateLimitError:
+                logger.warning(f"Groq RateLimitError (턴 {turn + 1}) — Ollama로 전환")
+                use_ollama = True
+                try:
+                    msg = self._call_llm(groq_client, messages, use_ollama=True)
+                except Exception as exc:
+                    return f"에이전트 실행 오류: {exc}"
+            except Exception as exc:
+                logger.error(f"ScreenAgent 호출 실패 (턴 {turn + 1}): {exc}")
+                return f"에이전트 실행 오류: {exc}"
+
+            # tool_calls 없음 → 최종 응답
+            if not msg["tool_calls"]:
+                content = msg["content"] or "작업을 완료했습니다."
+                return _FOREIGN_SCRIPT.sub("", content).strip()
+
+            # assistant 메시지 기록
+            messages.append(msg["assistant_msg"])
+
+            # 도구 순차 실행
+            for tc in msg["tool_calls"]:
+                fn_name = tc["function"]["name"]
+                try:
+                    fn_args = json.loads(tc["function"]["arguments"])
+                except json.JSONDecodeError:
+                    fn_args = {}
+                result     = self._dispatch_tool(fn_name, fn_args)
+                result_str = json.dumps(result, ensure_ascii=False)[:_MAX_TOOL_OUTPUT]
+                messages.append({
+                    "role":         "tool",
+                    "tool_call_id": tc["id"],
+                    "content":      result_str,
+                })
+
+        logger.warning(f"ScreenAgent: {_MAX_TURNS}턴 초과 — 태스크: {task!r}")
+        return "최대 반복 횟수에 도달했습니다. 작업 일부만 완료됐을 수 있습니다."
+
+    def _call_llm(
+        self,
+        groq_client: Groq,
+        messages: list[dict],
+        use_ollama: bool = False,
+    ) -> dict:
+        """LLM을 호출하고 정규화된 응답 dict를 반환한다.
+
+        Returns:
+            {
+                "content":      str | None,
+                "tool_calls":   [{"id": str, "function": {"name": str, "arguments": str}}, ...],
+                "assistant_msg": dict,  # messages 배열에 추가할 assistant 역할 dict
+            }
+        Raises:
+            groq.RateLimitError: Groq 한도 초과 시 (use_ollama=False일 때만 발생 가능)
+            requests.RequestException: Ollama 연결 실패 시 (use_ollama=True일 때만)
+            Exception: 기타 오류
+        """
+        if not use_ollama:
+            return self._call_groq(groq_client, messages)
+        else:
+            return self._call_ollama(messages)
+
+    def _call_groq(self, client: Groq, messages: list[dict]) -> dict:
+        """Groq SDK 호출 → 정규화된 dict 반환."""
+        response = client.chat.completions.create(
+            model       = _MODEL_GROQ,
+            messages    = messages,
+            tools       = _TOOLS,
+            tool_choice = "auto",
+            max_tokens  = _MAX_TOKENS,
+            timeout     = _TIMEOUT_GROQ,
+        )
+        msg = response.choices[0].message
+        tool_calls = []
+        if msg.tool_calls:
+            tool_calls = [
+                {
+                    "id": tc.id,
+                    "function": {
+                        "name":      tc.function.name,
+                        "arguments": tc.function.arguments,
+                    },
+                }
+                for tc in msg.tool_calls
+            ]
+        assistant_msg = {
+            "role":       "assistant",
+            "content":    msg.content,
+            "tool_calls": [
+                {"id": tc["id"], "type": "function", "function": tc["function"]}
+                for tc in tool_calls
+            ],
+        }
+        return {"content": msg.content, "tool_calls": tool_calls, "assistant_msg": assistant_msg}
+
+    def _call_ollama(self, messages: list[dict]) -> dict:
+        """Ollama OpenAI-호환 API 호출 (requests) → 정규화된 dict 반환."""
+        import requests as _req
+        host  = os.getenv("OLLAMA_HOST",  "localhost:11434")
+        model = os.getenv("OLLAMA_MODEL", "qwen2.5:7b")
+        if not host.startswith("http"):
+            host = f"http://{host}"
+
+        resp = _req.post(
+            f"{host}/v1/chat/completions",
+            json={
+                "model":       model,
+                "messages":    messages,
+                "tools":       _TOOLS,
+                "tool_choice": "auto",
+                "max_tokens":  _MAX_TOKENS,
+            },
+            timeout=_TIMEOUT_OLLAMA,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        msg_dict   = data["choices"][0]["message"]
+        raw_tcs    = msg_dict.get("tool_calls") or []
+        tool_calls = [
+            {
+                "id": tc.get("id", f"ollama_{i}"),
+                "function": {
+                    "name":      tc["function"]["name"],
+                    "arguments": (
+                        tc["function"]["arguments"]
+                        if isinstance(tc["function"]["arguments"], str)
+                        else json.dumps(tc["function"]["arguments"], ensure_ascii=False)
+                    ),
+                },
+            }
+            for i, tc in enumerate(raw_tcs)
+        ]
+        assistant_msg = {
+            "role":       "assistant",
+            "content":    msg_dict.get("content"),
+            "tool_calls": [
+                {"id": tc["id"], "type": "function", "function": tc["function"]}
+                for tc in tool_calls
+            ],
+        }
+        return {
+            "content":       msg_dict.get("content"),
+            "tool_calls":    tool_calls,
+            "assistant_msg": assistant_msg,
+        }
+
+    def _dispatch_tool(self, name: str, args: dict) -> dict:
+        """도구 이름으로 screen_tool / reporter_tool 함수를 호출한다."""
+        dispatch = {
+            "screenshot_read": lambda: screen_tool.screenshot_read(),
+            "mouse_click":     lambda: screen_tool.mouse_click(
+                                    args.get("x", 0), args.get("y", 0),
+                                    args.get("button", "left")),
+            "keyboard_type":   lambda: screen_tool.keyboard_type(args.get("text", "")),
+            "keyboard_key":    lambda: screen_tool.keyboard_key(args.get("key", "")),
+            "mouse_scroll":    lambda: screen_tool.mouse_scroll(
+                                    args.get("direction", "down"),
+                                    args.get("amount", 3),
+                                    args.get("x"), args.get("y")),
+            "get_windows":     lambda: screen_tool.get_windows(),
+            "focus_window":    lambda: screen_tool.focus_window(args.get("title", "")),
+            "open_app":        lambda: screen_tool.open_app(args.get("target", "")),
+            "report":          lambda: reporter_tool.report(args.get("message", "")),
+        }
+        fn = dispatch.get(name)
+        if fn is None:
+            logger.warning(f"알 수 없는 도구: {name}")
+            return {"ok": False, "data": None, "error": f"알 수 없는 도구: {name}"}
+        try:
+            return fn()
+        except Exception as exc:
+            logger.error(f"도구 실행 오류 ({name}): {exc}")
+            return {"ok": False, "data": None, "error": str(exc)}
+```
+
+---
+
+### A.5 `requirements.txt` 추가 패키지
+
+기존 `requirements.txt` 끝에 아래 블록을 추가한다.
+
+```text
+# PC 화면 제어 에이전트 (skills/skill_screen_agent.py + skills/agent_tools/screen_tool.py)
+pyautogui>=0.9.54        # 마우스·키보드 제어
+pytesseract>=0.3.10      # OCR (Tesseract 바이너리 별도 설치 필요 — 아래 주의사항 참고)
+Pillow>=10.0             # 스크린샷 이미지 처리 (pyautogui 가 보통 함께 설치하지만 명시)
+# pyperclip, pygetwindow는 이미 requirements.txt에 있음 — 재사용
+```
+
+**설치 명령 (참고)**:
+```powershell
+pip install pyautogui pytesseract Pillow
+# Tesseract OCR 바이너리 (Windows): winget install --id UB-Mannheim.TesseractOCR
+```
+
+---
+
+### A.6 `.env` 신규 키
+
+| 키 | 용도 | 필수/선택 | 기본값 |
+|---|---|---|---|
+| `OLLAMA_HOST` | Ollama 서버 주소 | 선택 | `localhost:11434` |
+| `OLLAMA_MODEL` | Ollama 사용 모델 | 선택 | `qwen2.5:7b` |
+| `TESSERACT_PATH` | Tesseract 실행 파일 경로 (screen_tool 내부에서 `pytesseract.pytesseract.tesseract_cmd` 설정) | 선택 | `C:\Program Files\Tesseract-OCR\tesseract.exe` |
+
+**`.env.example`에 추가할 내용**:
+```dotenv
+# Ollama 로컬 LLM (core/engines/ollama_engine.py)
+OLLAMA_HOST=localhost:11434
+OLLAMA_MODEL=qwen2.5:7b
+
+# Tesseract OCR 경로 (skills/agent_tools/screen_tool.py)
+TESSERACT_PATH=C:\Program Files\Tesseract-OCR\tesseract.exe
+```
+
+---
+
+### A.7 주의사항
+
+#### 1. 한국어 텍스트 입력
+
+`pyautogui.write("안녕하세요")`는 **동작하지 않는다**. `write()`는 내부적으로 ASCII 키코드를
+사용하므로 한국어(IME 경유 입력)를 처리하지 못한다.
+
+`keyboard_type()`은 반드시 **클립보드 경유(paste) 방식**을 써야 한다:
+
+```python
+import pyperclip
+import pyautogui
+pyperclip.copy(text)
+pyautogui.hotkey('ctrl', 'v')
+```
+
+단, 이 방식은 포커스된 창이 `Ctrl+V`를 붙여넣기로 처리해야 동작한다. 터미널/셸 창에서는
+`Ctrl+Shift+V`가 필요한 경우가 있으므로 구현 시 `PASTE_KEY` 환경변수나 설정으로 커스터마이징
+가능하도록 설계를 고려한다.
+
+#### 2. Tesseract 경로 설정
+
+`pytesseract`는 Tesseract 바이너리의 위치를 자동으로 찾지 못하는 경우가 많다. `screen_tool.py`
+모듈 최상단(또는 `screenshot_read()` 첫 호출 시점)에서 아래를 설정해야 한다:
+
+```python
+import pytesseract
+import os
+_TESSERACT_PATH = os.getenv(
+    "TESSERACT_PATH",
+    r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+)
+pytesseract.pytesseract.tesseract_cmd = _TESSERACT_PATH
+```
+
+한국어 OCR을 위해 Tesseract 설치 시 **한국어 언어 팩(`kor`)**이 함께 설치되어 있어야 한다.
+winget 설치 기준: `winget install --id UB-Mannheim.TesseractOCR` 에서 설치 옵션으로 Korean을
+체크해야 한다.
+
+#### 3. pyautogui FAILSAFE와 AbortException
+
+`pyautogui.FAILSAFE = True`(기본값)가 활성화된 상태에서 마우스가 화면 모서리로 이동하면
+`pyautogui.FailSafeException`이 발생해 에이전트 루프가 중단된다. 이는 의도된 안전장치다.
+에이전트가 예상치 못한 좌표로 마우스를 이동시킬 때 사람이 개입할 수 있는 탈출 방법이다.
+`FAILSAFE = False`로 비활성화하지 말 것.
+
+`_run_agent()` 루프의 `except Exception` 블록에서 이 예외를 잡아 명확한 한국어 메시지
+("안전장치 발동: 마우스가 모서리로 이동됐습니다. 에이전트를 종료합니다.")와 함께 루프를
+종료하도록 구현한다.
+
+#### 4. Ollama tool-calling 모델 선택
+
+Ollama에서 tool-calling을 지원하는 모델은 제한적이다. `qwen2.5:7b`는 OpenAI 호환 tool-calling을
+지원하며 한국어 능력도 양호하다. `llama3.2:3b`도 tool-calling을 지원하나 품질이 낮다.
+`OLLAMA_MODEL`을 변경할 경우 반드시 tool-calling 지원 여부를 먼저 확인해야 한다.
+
+Ollama가 반환하는 `tool_calls`의 `arguments` 필드가 문자열이 아닌 dict 객체인 경우가 있다
+(모델 구현에 따라 다름). `_call_ollama()` 의 `isinstance` 체크(`str` vs dict)가 이를 처리한다.
+
+#### 5. pygetwindow의 `.activate()` 신뢰성
+
+`pygetwindow`의 `.activate()` 메서드는 Windows에서 일부 앱(특히 UWP 앱)에 대해 실패하거나
+창을 최소화에서 복원하지 못하는 경우가 있다. 실패 시 fallback으로
+`win32gui.SetForegroundWindow()` (pywin32 패키지) 사용을 고려하나, `pywin32`는 현재
+`requirements.txt`에 없으므로 구현자 에이전트가 실제 테스트 후 결정한다.
+
+#### 6. Ollama와 같은 프로세스 내 메모리 경합
+
+화면 에이전트가 Ollama로 전환된 동안 로컬 추론 모델이 상당한 메모리를 사용한다(qwen2.5:7b는
+약 5~6 GB VRAM 또는 RAM). Groq가 복구(한도 리셋)되더라도 세션 내 Ollama 전환은 복원하지 않는
+설계이므로, Ollama 사용 기간 동안 시스템 부하가 높아질 수 있음을 사용자에게 안내한다.
+
+---
+
+### A.8 구현 배치 계획
+
+| 배치 | 내용 | 완료 기준 |
+|---|---|---|
+| **A-1. Ollama 엔진** | `core/engines/ollama_engine.py` 구현 | `python -c "from core.engines.ollama_engine import OllamaEngine; e=OllamaEngine(); print(e.describe())"` — `connected: True/False`가 JSON으로 출력. `OLLAMA_HOST`가 없어도 임포트 성공. |
+| **A-2. ai_chat 폴백 수정** | `skills/skill_ai_chat.py` 수정 | (1) `GROQ_API_KEY`를 비활성화한 상태에서 에이전트 실행 시 Ollama로 동작하는지 확인. (2) `_engine` property가 `describe()` dict를 반환하는지 `assert`. |
+| **A-3. screen_tool 구현** | `skills/agent_tools/screen_tool.py` 8개 함수 | `python -c "from skills.agent_tools import screen_tool; print(screen_tool.get_windows())"` — 열린 창 목록이 `ok: true` dict로 출력. `screenshot_read()` 실행 후 `data.elements`가 비어 있지 않음을 확인. |
+| **A-4. skill_screen_agent 구현** | `skills/skill_screen_agent.py` | `python main.py --text`에서 "화면 에이전트로 메모장 열어줘" 입력 → 메모장이 실제로 열리고, 에이전트가 한국어 완료 메시지를 응답하는지 확인. |
+| **A-5. Ollama 폴백 통합 테스트** | Groq 한도 소진 시나리오 시뮬레이션 | `_GROQ_RATE_LIMIT_SIGNAL`을 임시로 짧은 문자열로 바꿔 첫 응답에서 폴백이 트리거되도록 한 뒤, Ollama 응답이 정상 반환되는지 확인 후 상수 복원. |
