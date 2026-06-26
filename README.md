@@ -3,7 +3,7 @@
 Windows 네이티브 한국어 개인 AI 비서. 음성("Hey Jarvis" 또는 박수 두 번) 또는 웹 대시보드 텍스트로 조작합니다.
 
 **AI 엔진**: Groq (`llama-3.3-70b-versatile`) — 빠른 응답, 무료 티어 제공  
-**스킬**: 31개 (자동 등록 — `skills/skill_*.py` 파일만 추가하면 됨)
+**스킬**: 32개 (자동 등록 — `skills/skill_*.py` 파일만 추가하면 됨)
 
 ---
 
@@ -80,6 +80,7 @@ npm run typecheck  # 타입 검사
 | 웹 검색 | "환율 검색해줘", "요즘 주가 찾아줘" | DuckDuckGo 기본, Brave Search 선택 |
 | 위키백과 | "아인슈타인 알려줘", "블랙홀 위키백과" | MediaWiki REST API, 한국어 요약 TTS |
 | 방법 안내 | "파이썬 설치 방법", "엑셀 단축키 알려줘" | AI 기반 방법론 안내 |
+| **에이전트** | "AI 트렌드 조사해줘", "삼성전자 뉴스 찾아서 엑셀로 저장해줘" | Groq tool-calling 루프, 최대 10턴 자동 실행 |
 
 ### 날씨 & 정보
 
@@ -139,6 +140,37 @@ npm run typecheck  # 타입 검사
 | PDF 읽기 | "보고서.pdf 읽어줘" | pypdf 파싱 + edge-tts 음성 출력 |
 | QR 코드 | "QR 코드 만들어줘" | `data/qr/` 에 PNG 저장 |
 | 농담 | "농담 해줘", "웃긴 거 알려줘" | pyjokes |
+
+---
+
+## 에이전트 상세
+
+"AI 트렌드 조사해줘" 같은 복합 태스크를 Groq Llama의 native tool-calling으로 자동 수행합니다.
+
+### 트리거 조건
+
+| 패턴 | 예시 |
+|------|------|
+| `~조사해줘 / ~수집해줘` | "최신 AI 논문 수집해줘", "파이썬 라이브러리 조사해줘" |
+| `찾아서/검색해서 + 저장 키워드` | "삼성전자 뉴스 찾아서 엑셀로 저장해줘" |
+| `에이전트로 ~` | "에이전트로 처리해줘" |
+
+### 내장 도구 8종
+
+| 도구 | 동작 |
+|------|------|
+| `search` | DuckDuckGo 웹 검색 (최대 5건) |
+| `open_url` | URL 페이지 열기 (requests + BeautifulSoup4) |
+| `get_all_text` | 현재 페이지 본문 추출 |
+| `get_links` | 현재 페이지 링크 목록 추출 |
+| `save_text` | 바탕화면에 txt 저장 |
+| `save_json` | 바탕화면에 JSON 저장 |
+| `save_xlsx` | 바탕화면에 엑셀 저장 (openpyxl) |
+| `report` | 진행 상황 TTS 보고 |
+
+- **저장 위치**: 항상 바탕화면 (`~/Desktop`). 파일명을 지정하지 않으면 `jarvis_YYYYMMDD_HHMMSS.확장자` 자동 생성
+- **도구 실패 복구**: 특정 페이지 접근 실패(ok=False) 시 에이전트가 스스로 대안을 찾아 계속 진행
+- **출력 절삭**: 도구 결과는 2000자로 잘라 컨텍스트 과부하를 방지
 
 ---
 
@@ -204,7 +236,13 @@ jarvis-core/
 ├── ui/
 │   ├── server.py              # FastAPI (GET /api/status, POST /api/chat, WS /ws)
 │   └── web/                   # React 18 + TypeScript + Vite 프론트엔드
-├── skills/                    # ⭐ 기능 파일 — 여기에만 추가 (31개)
+├── skills/                    # ⭐ 기능 파일 — 여기에만 추가 (32개)
+│   ├── agent_tools/           # 에이전트 전용 도구 패키지 (SkillRegistry 스캔 제외)
+│   │   ├── browser_tool.py    # requests+BeautifulSoup4 웹 페이지 추출
+│   │   ├── search_tool.py     # DuckDuckGo 검색
+│   │   ├── file_tool.py       # txt/json/xlsx 파일 저장
+│   │   └── reporter_tool.py   # TTS 콜백 진행 보고
+│   ├── skill_agent.py         # Groq tool-calling 에이전트 (조사·수집·저장)
 │   ├── skill_ai_chat.py       # AI 대화 폴백
 │   ├── skill_web_search.py    # 웹 검색
 │   ├── skill_weather.py       # 날씨
@@ -236,7 +274,7 @@ jarvis-core/
 │   ├── skill_howto.py         # 방법 안내
 │   ├── skill_qr.py            # QR 코드
 │   └── skill_joke.py          # 농담
-├── tests/                     # assert 기반 단위 테스트 (29개)
+├── tests/                     # assert 기반 단위 테스트 (38개)
 ├── data/                      # 런타임 데이터
 │   ├── contacts.json          # 연락처
 │   ├── schedule.json          # 일정
@@ -281,6 +319,11 @@ python -m tests.test_skill_timer
 python -m tests.test_skill_browser
 python -m tests.test_skill_email
 # ... 등 tests/ 아래 test_*.py 전부 동일 방식
+
+# 에이전트 테스트 3종
+python -m tests.test_agent_tools    # 도구 단위 테스트 20개
+python -m tests.test_skill_agent    # 스킬 단위 테스트 15개
+python -m tests.test_agent_e2e      # 엔드투엔드 시나리오 3개
 ```
 
 ---
@@ -292,3 +335,4 @@ python -m tests.test_skill_email
 - **화면 녹화·녹음·카메라**: ffmpeg이 PATH에 없으면 기능이 비활성화됩니다.
 - **Gmail 앱 비밀번호**: 구글 계정 비밀번호가 아닌 "앱 비밀번호"를 사용하세요 (2단계 인증 필요).
 - **슬립 모드**: 음성인식만 중단됩니다. 재활성화하려면 "Hey Jarvis" 또는 박수 두 번을 사용하세요.
+- **에이전트 파일 저장**: 에이전트가 생성한 파일은 바탕화면에 저장됩니다. 불필요한 경우 직접 삭제하세요.
