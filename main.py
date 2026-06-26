@@ -128,6 +128,11 @@ def _run_voice_loop(router: Router, dispatcher: Dispatcher, context: Conversatio
             result = dispatcher.dispatch(skill, event.text, context, channel=event.channel)
 
             tts.speak(result.speech)
+            if context.get("sleep_requested"):
+                context.set("sleep_requested", False)
+                active = False
+                broadcaster.emit(state="idle")
+                continue
     except KeyboardInterrupt:
         print("\n자비스를 종료합니다.")
         broadcaster.emit(state="idle")
