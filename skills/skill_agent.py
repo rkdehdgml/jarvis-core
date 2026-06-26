@@ -7,9 +7,13 @@ core/는 일절 수정하지 않는다.
 import json
 import logging
 import os
+import re
+from urllib.parse import unquote
+
+_FOREIGN_SCRIPT = re.compile("[一-鿿㐀-䶿぀-ゟ゠-ヿ]")
 
 from dotenv import load_dotenv
-from groq import Groq
+from groq import BadRequestError, Groq
 
 from core.skill_base import Skill, SkillResult
 from skills.agent_tools import browser_tool, file_tool, reporter_tool, search_tool
@@ -18,10 +22,10 @@ load_dotenv()
 logger = logging.getLogger(__name__)
 
 _MODEL = "llama-3.3-70b-versatile"
-_MAX_TURNS = 10
-_MAX_TOKENS = 2048
+_MAX_TURNS = 15
+_MAX_TOKENS = 4096
 _TIMEOUT = 60
-_MAX_TOOL_OUTPUT = 2000  # 도구 결과 최대 길이 — 컨텍스트 과부하 방지
+_MAX_TOOL_OUTPUT = 5000  # 도구 결과 최대 길이 — 컨텍스트 과부하 방지
 
 # ── 라우팅 키워드 ──────────────────────────────────────────────────────────────
 # 단독으로도 멀티스텝 태스크를 명확히 암시하는 단어
@@ -31,13 +35,14 @@ _MULTI_STEP_ACTIONS = ["찾아서", "검색해서"]
 _SAVE_KEYWORDS = ["저장해줘", "엑셀로", "파일로 만들어줘", "파일로 정리"]
 
 _SYSTEM_PROMPT = (
-    "너는 자비스 에이전트야. 사용자의 요청을 분석하고 주어진 도구를 단계적으로 사용해서 작업을 완료해줘.\n\n"
-    "규칙:\n"
-    "1. 작업 시작 전 report 도구로 무엇을 할지 간단히 알려줘\n"
-    "2. 검색이 필요하면 search, 페이지 내용이 필요하면 open_url → get_all_text 순서로 사용해\n"
-    "3. 결과를 파일로 저장할 때는 내용에 따라 save_text · save_json · save_xlsx 중 선택해\n"
-    "4. 모든 작업이 끝나면 최종 결과를 한 문단으로 요약해서 알려줘\n"
-    "5. 모든 응답과 report 메시지는 반드시 한국어로 해"
+    "You are Jarvis, a personal AI assistant. Complete the user's task step by step using the provided tools.\n\n"
+    "Workflow:\n"
+    "1. Use 'report' to announce what you are about to do.\n"
+    "2. Use 'search' to find relevant information. The search results contain titles and summaries — these are REAL data you must use.\n"
+    "3. Optionally use 'open_url' then 'get_all_text' to get more details from a specific page.\n"
+    "4. Use 'save_text' to save ALL collected information: search result titles, summaries, place names, addresses, menus, atmosphere, and any page content. Write a detailed, well-organized text — NOT just URLs.\n"
+    "5. Respond to the user in friendly, natural Korean (informal polite, not stiff).\n\n"
+    "IMPORTANT: Save actual content (titles, summaries, details), never just URLs or placeholder text."
 )
 
 _TOOLS = [
@@ -219,6 +224,24 @@ class AgentSkill(Skill):
                     max_tokens=_MAX_TOKENS,
                     timeout=_TIMEOUT,
                 )
+            except BadRequestError as exc:
+                # tool_use_failed: 모델이 URL 인코딩된 한국어 인자를 생성한 경우 디코딩 후 재실행
+                recovered = self._recover_tool_use_failed(exc, turn)
+                if recovered is not None:
+                    fn_name, fn_args, fake_id = recovered
+                    messages.append({
+                        "role": "assistant",
+                        "content": None,
+                        "tool_calls": [{"id": fake_id, "type": "function",
+                                        "function": {"name": fn_name,
+                                                     "arguments": json.dumps(fn_args, ensure_ascii=False)}}],
+                    })
+                    result = self._dispatch_tool(fn_name, fn_args)
+                    result_str = json.dumps(result, ensure_ascii=False)[:_MAX_TOOL_OUTPUT]
+                    messages.append({"role": "tool", "tool_call_id": fake_id, "content": result_str})
+                    continue
+                logger.error(f"AgentSkill Groq 호출 실패 (턴 {turn + 1}): {exc}")
+                return f"에이전트 실행 중 오류가 발생했습니다: {exc}"
             except Exception as exc:
                 logger.error(f"AgentSkill Groq 호출 실패 (턴 {turn + 1}): {exc}")
                 return f"에이전트 실행 중 오류가 발생했습니다: {exc}"
@@ -227,7 +250,8 @@ class AgentSkill(Skill):
 
             # 도구 호출 없음 → 최종 응답
             if not msg.tool_calls:
-                return msg.content or "작업을 완료했습니다."
+                content = msg.content or "작업을 완료했습니다."
+                return _FOREIGN_SCRIPT.sub("", content)
 
             # assistant 메시지를 dict로 변환해서 messages에 추가
             messages.append({
@@ -266,6 +290,49 @@ class AgentSkill(Skill):
         logger.warning(f"AgentSkill: {_MAX_TURNS}턴 초과 — 태스크: {task!r}")
         return "최대 반복 횟수에 도달했습니다. 작업 일부만 완료됐을 수 있습니다."
 
+    def _recover_tool_use_failed(self, exc: BadRequestError, turn: int):
+        """Groq tool_use_failed 400 오류에서 URL 디코딩으로 복구한다.
+
+        Returns:
+            (fn_name, fn_args, fake_id) — 복구 성공 시
+            None — 복구 불가 시
+        """
+        body = getattr(exc, "body", None) or {}
+        error = body.get("error", {}) if isinstance(body, dict) else {}
+        if error.get("code") != "tool_use_failed":
+            return None
+        failed_gen: str = error.get("failed_generation", "")
+        if not failed_gen:
+            return None
+
+        # 함수 이름 추출 — <function=name> 또는 <function=name[]> 등 변형 처리
+        name_m = re.match(r"<function=(\w+)", failed_gen)
+        if not name_m:
+            return None
+        fn_name = name_m.group(1)
+
+        # JSON 인자 추출 — 첫 번째 { 부터 </function> 직전까지
+        json_start = failed_gen.find("{")
+        if json_start == -1:
+            return None
+        raw_args = re.sub(r"\s*</function>\s*$", "", failed_gen[json_start:])
+
+        # URL 인코딩된 한국어 복원 후 파싱 (open_url은 URL 자체를 보존)
+        decoded = unquote(raw_args) if fn_name != "open_url" else raw_args
+        try:
+            fn_args = json.loads(decoded)
+        except json.JSONDecodeError:
+            # 디코딩 없이 재시도
+            try:
+                fn_args = json.loads(raw_args)
+            except json.JSONDecodeError:
+                logger.warning(f"tool_use_failed 복구 실패 — JSON 파싱 불가: {raw_args[:100]}")
+                return None
+
+        fake_id = f"recovered_{turn}"
+        logger.info(f"tool_use_failed 복구 성공: {fn_name}({list(fn_args.keys())})")
+        return fn_name, fn_args, fake_id
+
     def _dispatch_tool(self, name: str, args: dict) -> dict:
         """도구 이름으로 실제 함수를 호출하고 결과를 반환한다."""
         if name == "search":
@@ -277,7 +344,10 @@ class AgentSkill(Skill):
         if name == "get_links":
             return browser_tool.get_links(args.get("selector", ""))
         if name == "save_text":
-            return file_tool.save_text(args.get("content", ""), args.get("filename", ""))
+            content = args.get("content", "")
+            # 모델이 간혹 \n을 두 글자 리터럴로 생성하는 경우 실제 줄바꿈으로 변환
+            content = content.replace("\\n", "\n")
+            return file_tool.save_text(content, args.get("filename", ""))
         if name == "save_json":
             return file_tool.save_json(args.get("data", {}), args.get("filename", ""))
         if name == "save_xlsx":

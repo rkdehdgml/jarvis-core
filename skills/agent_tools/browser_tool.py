@@ -19,7 +19,18 @@ _HEADERS = {
     )
 }
 _TIMEOUT = 15
-_MAX_TEXT = 4000  # 반환 텍스트 최대 길이 (Stage 2에서 2000자로 추가 절삭)
+_MAX_TEXT = 8000  # 반환 텍스트 최대 길이
+
+
+def _normalize_url(url: str) -> str:
+    """네이버 블로그 PC URL → 모바일 URL로 변환한다.
+
+    blog.naver.com/xxx/yyy 는 iframe 구조라 본문이 비어 있다.
+    m.blog.naver.com/xxx/yyy 는 단일 페이지로 본문 전체가 담긴다.
+    """
+    if "blog.naver.com/" in url and "m.blog.naver.com" not in url:
+        url = url.replace("://blog.naver.com/", "://m.blog.naver.com/")
+    return url
 
 # 모듈 레벨 세션 상태 — open_url() 이후 다른 함수들이 공유한다.
 _state: dict[str, Any] = {"soup": None, "url": ""}
@@ -28,9 +39,12 @@ _state: dict[str, Any] = {"soup": None, "url": ""}
 def open_url(url: str) -> dict[str, Any]:
     """URL 페이지를 열고 내부 세션에 저장한다.
 
+    네이버 블로그 PC URL은 모바일 URL로 자동 변환해 본문을 가져온다.
+
     Returns:
         {"ok": True, "data": url, "error": ""} 또는 {"ok": False, "data": None, "error": 메시지}
     """
+    url = _normalize_url(url)
     try:
         resp = requests.get(url, headers=_HEADERS, timeout=_TIMEOUT)
         resp.raise_for_status()
