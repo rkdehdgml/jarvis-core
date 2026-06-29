@@ -54,7 +54,10 @@ _SYSTEM_PROMPT = (
     "- For web: use open_app() with full https:// URL, then screenshot_read() after page load\n"
     "- For address bar: use keyboard_key('ctrl+l') to focus, then keyboard_type(url), then keyboard_key('enter')\n"
     "- Collect requested data by reading screenshot_read() summaries and include it in your final response\n"
-    "- Respond ONLY in Korean when done. Be friendly and natural."
+    "- FINAL RESPONSE RULES (very important):\n"
+    "  * Write ONLY in Korean. Be concise — 1~2 sentences max.\n"
+    "  * NEVER include raw screenshot data, element lists, or coordinates in the final response.\n"
+    "  * Just state what was done and whether it succeeded. Example: '메모장을 열고 반갑습니다를 입력했습니다.'"
 )
 
 _XML_TOOL_RE = re.compile(r'<function=(\w+)\s*(\{[^<]*?\})?>', re.DOTALL)
