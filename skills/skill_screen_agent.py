@@ -60,7 +60,7 @@ _SYSTEM_PROMPT = (
     "  * Just state what was done and whether it succeeded. Example: '메모장을 열고 반갑습니다를 입력했습니다.'"
 )
 
-_XML_TOOL_RE = re.compile(r'<function=(\w+)\s*(\{[^<]*?\})?>', re.DOTALL)
+_XML_TOOL_RE = re.compile(r'<function=(\w+)\s*(\{[^<]*?\})', re.DOTALL)
 
 _TOOLS = [
     {
