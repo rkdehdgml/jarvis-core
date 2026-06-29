@@ -172,12 +172,22 @@ def keyboard_type(text: str) -> dict[str, Any]:
         text: 입력할 텍스트 (한국어 포함 가능)
     """
     try:
-        import pyautogui
+        import ctypes
         import pyperclip
 
+        # Windows 클립보드에 유니코드로 직접 복사
         pyperclip.copy(text)
-        time.sleep(0.1)
-        pyautogui.hotkey("ctrl", "v")
+        time.sleep(0.15)
+
+        # WM_PASTE(0x0302)를 창에 직접 전송 — IME 키 이벤트를 완전히 우회
+        # ctrl+v 키 이벤트는 한국어 IME 활성 상태에서 문자가 변환되는 문제가 있음
+        try:
+            WM_PASTE = 0x0302
+            hwnd = ctypes.windll.user32.GetForegroundWindow()
+            ctypes.windll.user32.SendMessage(hwnd, WM_PASTE, 0, 0)
+        except Exception:
+            import pyautogui
+            pyautogui.hotkey("ctrl", "v")
         time.sleep(0.2)
 
         return {"ok": True, "data": text, "error": ""}
