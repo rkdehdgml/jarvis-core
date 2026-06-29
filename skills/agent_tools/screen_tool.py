@@ -1,15 +1,17 @@
-"""pyautogui + pytesseract 기반 PC 화면 인식·제어 도구.
+"""pyautogui + Windows 내장 OCR(winocr) 기반 PC 화면 인식·제어 도구.
 
 skill_screen_agent.py의 Groq/Ollama 루프에서 tool로 노출된다.
 모든 함수는 {"ok": bool, "data": ..., "error": str} 형식을 반환하고 예외를 던지지 않는다.
 
-사전 요구사항:
-  1. pip install pyautogui pytesseract Pillow
-  2. Tesseract OCR 설치: https://github.com/UB-Mannheim/tesseract/wiki
-     (기본 경로: C:\\Program Files\\Tesseract-OCR\\tesseract.exe)
-  3. Tesseract 설치 시 Korean language pack 체크 필수
-  4. .env에 TESSERACT_PATH 지정 (기본 경로와 다를 경우)
+사전 요구사항 (pip install만으로 완결):
+  pip install pyautogui winocr Pillow
+  → Tesseract 바이너리 별도 설치 불필요 (Windows 10/11 내장 OCR 사용)
+
+Windows 언어 팩:
+  한국어 OCR은 Windows에 한국어 언어 팩이 설치돼 있어야 한다.
+  (한국어 사용자라면 이미 설치됨 — 설정 > 시간 및 언어 > 언어)
 """
+import asyncio
 import logging
 import os
 import re
@@ -20,80 +22,65 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-_TESSERACT_PATH = os.getenv(
-    "TESSERACT_PATH",
-    r"C:\Program Files\Tesseract-OCR\tesseract.exe",
-)
 _MAX_ELEMENTS = 50   # 한 화면에서 반환할 최대 요소 수
-_OCR_CONF_MIN = 40   # 이 값 미만의 OCR 신뢰도는 버림
-
-
-def _setup_tesseract() -> None:
-    """pytesseract에 Tesseract 바이너리 경로를 알려준다."""
-    try:
-        import pytesseract
-        if os.path.exists(_TESSERACT_PATH):
-            pytesseract.pytesseract.tesseract_cmd = _TESSERACT_PATH
-    except ImportError:
-        pass
+_OCR_LANG     = "ko" # Windows OCR 언어 코드 (한국어)
 
 
 # ── 화면 인식 ─────────────────────────────────────────────────────────────────
 
 def screenshot_read() -> dict[str, Any]:
-    """화면을 캡처하고 OCR로 번호가 매겨진 텍스트 요소 목록을 반환한다.
+    """화면을 캡처하고 Windows 내장 OCR로 번호가 매겨진 텍스트 요소 목록을 반환한다.
 
     각 요소: {"id": int, "text": str, "x": int, "y": int}
     summary: Groq/Ollama에 전달할 요소 목록 문자열
+    Tesseract 바이너리 불필요 — winocr이 Windows.Media.Ocr API를 직접 호출한다.
     """
     try:
         import pyautogui
-        import pytesseract
-        from PIL import Image  # noqa: F401 — pytesseract 내부 의존
-
-        _setup_tesseract()
+        import winocr
 
         screenshot = pyautogui.screenshot()
 
-        data = pytesseract.image_to_data(
-            screenshot,
-            lang="kor+eng",
-            output_type=pytesseract.Output.DICT,
-        )
+        # Windows 내장 OCR 호출
+        # winocr.recognize_pil()은 WinRT IAsyncOperation을 반환하므로
+        # async def 래퍼 안에서 await 해야 asyncio가 올바르게 처리한다.
+        async def _run_ocr(img):
+            return await winocr.recognize_pil(img, _OCR_LANG)
 
-        # 줄(block+par+line) 단위로 그룹화
-        line_map: dict[tuple, list[int]] = {}
-        for i in range(len(data["text"])):
-            txt = (data["text"][i] or "").strip()
-            conf = int(data["conf"][i])
-            if not txt or conf < _OCR_CONF_MIN:
-                continue
-            key = (data["block_num"][i], data["par_num"][i], data["line_num"][i])
-            line_map.setdefault(key, []).append(i)
+        try:
+            ocr_result = asyncio.run(_run_ocr(screenshot))
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            try:
+                ocr_result = loop.run_until_complete(_run_ocr(screenshot))
+            finally:
+                loop.close()
 
         elements: list[dict] = []
-        for indices in line_map.values():
-            words = [data["text"][i] for i in indices]
-            line_text = " ".join(words).strip()
-            if len(line_text) < 2:
+        for line in ocr_result.lines:
+            text = (line.text or "").strip()
+            if len(text) < 2:
                 continue
 
-            left   = min(data["left"][i] for i in indices)
-            top    = min(data["top"][i] for i in indices)
-            right  = max(data["left"][i] + data["width"][i] for i in indices)
-            bottom = max(data["top"][i] + data["height"][i] for i in indices)
-            cx = (left + right) // 2
-            cy = (top + bottom) // 2
+            # OcrLine has no bounding_rect — compute from child words
+            words = list(line.words)
+            if not words:
+                continue
+            xs  = [w.bounding_rect.x for w in words]
+            ys  = [w.bounding_rect.y for w in words]
+            x2s = [w.bounding_rect.x + w.bounding_rect.width  for w in words]
+            y2s = [w.bounding_rect.y + w.bounding_rect.height for w in words]
+            cx = int((min(xs) + max(x2s)) / 2)
+            cy = int((min(ys) + max(y2s)) / 2)
 
             elements.append({
                 "id": len(elements) + 1,
-                "text": line_text,
+                "text": text,
                 "x": cx,
                 "y": cy,
             })
 
         elements = elements[:_MAX_ELEMENTS]
-
         summary = "\n".join(
             f'[{e["id"]}] "{e["text"]}" at ({e["x"]}, {e["y"]})'
             for e in elements
@@ -113,11 +100,7 @@ def screenshot_read() -> dict[str, Any]:
     except ImportError as exc:
         return {
             "ok": False, "data": None,
-            "error": (
-                f"필수 패키지 미설치: {exc}. "
-                "'pip install pyautogui pytesseract Pillow' 를 실행하고 "
-                "Tesseract OCR 바이너리도 설치해주세요."
-            ),
+            "error": f"필수 패키지 미설치: {exc}. 'pip install pyautogui winocr Pillow' 를 실행해주세요.",
         }
     except Exception as exc:
         logger.warning(f"screenshot_read 실패: {exc}")
