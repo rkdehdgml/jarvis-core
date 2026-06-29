@@ -166,34 +166,72 @@ def mouse_scroll(
 # ── 키보드 제어 ───────────────────────────────────────────────────────────────
 
 def keyboard_type(text: str) -> dict[str, Any]:
-    """텍스트를 입력한다. 한국어를 포함한 모든 문자 지원 (클립보드 붙여넣기 방식).
+    """텍스트를 입력한다. 한국어를 포함한 모든 문자 지원.
+
+    SendInput + KEYEVENTF_UNICODE 방식으로 유니코드 코드포인트를 직접 전송하므로
+    한국어 IME 상태와 무관하게 정확한 문자가 입력된다.
+    클립보드를 전혀 사용하지 않으므로 포커스 창이 바뀌어도 영향 없음.
 
     Args:
         text: 입력할 텍스트 (한국어 포함 가능)
     """
     try:
         import ctypes
-        import pyperclip
+        import ctypes.wintypes
 
-        # Windows 클립보드에 유니코드로 직접 복사
-        pyperclip.copy(text)
-        time.sleep(0.15)
+        INPUT_KEYBOARD = 1
+        KEYEVENTF_UNICODE = 0x0004
+        KEYEVENTF_KEYUP  = 0x0002
 
-        # WM_PASTE(0x0302)를 창에 직접 전송 — IME 키 이벤트를 완전히 우회
-        # ctrl+v 키 이벤트는 한국어 IME 활성 상태에서 문자가 변환되는 문제가 있음
-        try:
-            WM_PASTE = 0x0302
-            hwnd = ctypes.windll.user32.GetForegroundWindow()
-            ctypes.windll.user32.SendMessage(hwnd, WM_PASTE, 0, 0)
-        except Exception:
-            import pyautogui
-            pyautogui.hotkey("ctrl", "v")
-        time.sleep(0.2)
+        class KEYBDINPUT(ctypes.Structure):
+            _fields_ = [
+                ("wVk",         ctypes.wintypes.WORD),
+                ("wScan",       ctypes.wintypes.WORD),
+                ("dwFlags",     ctypes.wintypes.DWORD),
+                ("time",        ctypes.wintypes.DWORD),
+                ("dwExtraInfo", ctypes.c_ulong),
+            ]
+
+        class _UNION(ctypes.Union):
+            _fields_ = [("ki", KEYBDINPUT), ("_pad", ctypes.c_byte * 28)]
+
+        class INPUT(ctypes.Structure):
+            _fields_ = [("type", ctypes.wintypes.DWORD), ("u", _UNION)]
+
+        for ch in text:
+            code = ord(ch)
+            # BMP 범위(U+0000–U+FFFF)는 그대로, 서로게이트 페어 처리
+            codepoints = [code] if code <= 0xFFFF else [
+                0xD800 + ((code - 0x10000) >> 10),
+                0xDC00 + ((code - 0x10000) & 0x3FF),
+            ]
+            for cp in codepoints:
+                evt = (INPUT * 2)()
+                evt[0].type = INPUT_KEYBOARD
+                evt[0].u.ki.wScan  = cp
+                evt[0].u.ki.dwFlags = KEYEVENTF_UNICODE
+                evt[1].type = INPUT_KEYBOARD
+                evt[1].u.ki.wScan  = cp
+                evt[1].u.ki.dwFlags = KEYEVENTF_UNICODE | KEYEVENTF_KEYUP
+                ctypes.windll.user32.SendInput(2, evt, ctypes.sizeof(INPUT))
+                time.sleep(0.008)
 
         return {"ok": True, "data": text, "error": ""}
+
     except Exception as exc:
-        logger.warning(f"keyboard_type 실패: {exc}")
-        return {"ok": False, "data": None, "error": str(exc)}
+        # 폴백: 클립보드 붙여넣기
+        logger.warning(f"SendInput 실패, 클립보드 폴백: {exc}")
+        try:
+            import pyperclip
+            import pyautogui
+            pyperclip.copy(text)
+            time.sleep(0.15)
+            pyautogui.hotkey("ctrl", "v")
+            time.sleep(0.2)
+            return {"ok": True, "data": text, "error": ""}
+        except Exception as exc2:
+            logger.warning(f"keyboard_type 실패: {exc2}")
+            return {"ok": False, "data": None, "error": str(exc2)}
 
 
 def keyboard_key(key: str) -> dict[str, Any]:
