@@ -1,11 +1,11 @@
 import logging
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Literal
 
 logger = logging.getLogger(__name__)
 
-State = Literal["idle", "listening", "processing", "responded"]
+State = Literal["idle", "listening", "processing", "responded", "navigation_request"]
 
 
 @dataclass
@@ -13,13 +13,15 @@ class StatusEvent:
     """본체의 현재 상태를 나타내는 이벤트.
 
     Attributes:
-        state: 본체 상태 (idle | listening | processing | responded).
+        state: 본체 상태 (idle | listening | processing | responded | navigation_request).
         last_response: 가장 최근 응답 텍스트. responded 상태가 아니면 None일 수 있음.
         timestamp: 이벤트 발생 시각 (Unix epoch).
+        extra: 상태별 추가 데이터 (예: navigation_request 시 destination/routeType).
     """
     state: State
     last_response: str | None
     timestamp: float
+    extra: dict = field(default_factory=dict)
 
 
 Subscriber = Callable[[StatusEvent], None]
@@ -46,9 +48,14 @@ class StatusBroadcaster:
         if callback in self._subscribers:
             self._subscribers.remove(callback)
 
-    def emit(self, state: State, last_response: str | None = None) -> None:
+    def emit(self, state: State, last_response: str | None = None, extra: dict | None = None) -> None:
         """상태 변화를 발행한다. 모든 구독자에게 즉시 전달된다."""
-        event = StatusEvent(state=state, last_response=last_response, timestamp=time.time())
+        event = StatusEvent(
+            state=state,
+            last_response=last_response,
+            timestamp=time.time(),
+            extra=extra or {},
+        )
         self._current = event
 
         logger.info(f"[상태] {state}" + (f" — {last_response}" if last_response else ""))

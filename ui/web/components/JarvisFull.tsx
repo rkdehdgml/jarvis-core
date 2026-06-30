@@ -3,6 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { useJarvisStatus, type JarvisState } from "../hooks/useJarvisStatus";
 import { useMicLevels } from "../hooks/useMicLevels";
 import { ChatInput } from "./ChatInput";
+import { KakaoMap } from "./KakaoMap";
 import "./JarvisFull.css";
 
 const CORE_TEXT: Record<JarvisState, { main: string; sub: string }> = {
@@ -10,6 +11,7 @@ const CORE_TEXT: Record<JarvisState, { main: string; sub: string }> = {
   listening: { main: "듣고 있습니다", sub: "LISTENING" },
   processing: { main: "처리 중...", sub: "PROCESSING" },
   responded: { main: "응답 완료", sub: "DONE" },
+  navigation_request: { main: "경로 검색 중", sub: "NAVIGATING" },
 };
 
 const WAVE_BAR_COUNT = 24;
@@ -38,6 +40,7 @@ export function JarvisFull() {
   const clock = useClock();
   const micLevels = useMicLevels(status.currentState === "listening", WAVE_BAR_COUNT);
   const logRef = useRef<HTMLDivElement>(null);
+  const { clearNavigation } = status;
 
   const coreText = CORE_TEXT[status.currentState];
 
@@ -109,6 +112,14 @@ export function JarvisFull() {
           </div>
         </div>
       </div>
+
+      {status.navigationData && status.kakaoJsKey && (
+        <KakaoMap
+          data={status.navigationData}
+          jsKey={status.kakaoJsKey}
+          onClose={clearNavigation}
+        />
+      )}
 
       <div className="jarvis-full__chat-area">
         <div className="jarvis-full__chat-col">

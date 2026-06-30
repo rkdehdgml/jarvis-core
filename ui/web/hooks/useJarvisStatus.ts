@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-export type JarvisState = "idle" | "listening" | "processing" | "responded";
+export type JarvisState = "idle" | "listening" | "processing" | "responded" | "navigation_request";
 
 export interface ConversationTurn {
   role: "user" | "jarvis";
@@ -20,6 +20,19 @@ export interface EngineInfo {
   connected: boolean;
 }
 
+export interface NavigationData {
+  destination: { lat: number; lng: number; name: string };
+  origin: { lat: number; lng: number };
+  routeType: string;
+  distance: number;
+  duration: number;
+  distanceText: string;
+  durationText: string;
+  vertexes: [number, number][];
+  fareToll: number;
+  fareTaxi: number;
+}
+
 export interface JarvisStatus {
   engineInfo: EngineInfo;
   usageToday: number | null;
@@ -28,11 +41,13 @@ export interface JarvisStatus {
   currentState: JarvisState;
   lastResponse: string | null;
   conversationLog: ConversationTurn[];
+  navigationData: NavigationData | null;
+  kakaoJsKey: string;
 }
 
 export interface UseJarvisStatusResult extends JarvisStatus {
-  /** 채팅 메시지를 보낸다. 사용자 발화를 즉시 로그에 추가하고 /api/chat 으로 전송한다. */
   sendMessage: (text: string) => Promise<void>;
+  clearNavigation: () => void;
 }
 
 interface StatusApiResponse {
@@ -52,6 +67,7 @@ interface WsPushPayload {
   engineInfo: EngineInfo;
   systemInfo: SystemInfo;
   usageToday: number | null;
+  extra?: Record<string, unknown>;
 }
 
 type HistoryApiResponse = ConversationTurn[];
@@ -68,6 +84,8 @@ const initialStatus: JarvisStatus = {
   currentState: "idle",
   lastResponse: null,
   conversationLog: [],
+  navigationData: null,
+  kakaoJsKey: "",
 };
 
 /**
@@ -94,8 +112,6 @@ export function useJarvisStatus(): UseJarvisStatusResult {
         ...prev,
         currentState: payload.state,
         lastResponse: payload.lastResponse ?? prev.lastResponse,
-        // 채팅 상태 변화든 주기적인 시스템 정보 틱이든, push될 때마다 최신값으로
-        // 비동기 갱신한다 (페이지 로드 시 한 번만 받던 동기식 스냅샷을 대체).
         engineInfo: payload.engineInfo,
         systemInfo: payload.systemInfo,
         usageToday: payload.usageToday,
@@ -110,6 +126,40 @@ export function useJarvisStatus(): UseJarvisStatusResult {
 
       return next;
     });
+
+    // navigation_request 이벤트: Geolocation 취득 후 /api/navigate 호출
+    if (isNewEvent && payload.state === "navigation_request" && payload.extra?.destination) {
+      const destination = payload.extra.destination as string;
+      const routeType = (payload.extra.routeType as string) || "RECOMMEND";
+
+      if (!navigator.geolocation) return;
+
+      navigator.geolocation.getCurrentPosition(
+        async (position) => {
+          const origin = {
+            lat: position.coords.latitude,
+            lng: position.coords.longitude,
+          };
+          try {
+            const res = await fetch(`${API_BASE}/api/navigate`, {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({ destination, origin, routeType }),
+            });
+            const data = (await res.json()) as NavigationData & { error?: string };
+            if (!data.error) {
+              setStatus((prev) => ({ ...prev, navigationData: data }));
+            }
+          } catch {
+            // 네트워크 오류 시 조용히 무시
+          }
+        },
+        () => {
+          // Geolocation 거부/실패 시 조용히 무시
+        },
+        { timeout: 10000 },
+      );
+    }
   }, []);
 
   const connect = useCallback(() => {
@@ -126,10 +176,6 @@ export function useJarvisStatus(): UseJarvisStatusResult {
     };
 
     ws.onclose = () => {
-      // wsRef.current가 이미 다른 소켓으로 교체된 뒤라면 이 소켓은 의도적으로
-      // 닫힌(StrictMode의 mount→unmount→remount, 혹은 재연결) "유령" 소켓이다.
-      // 그 경우 재연결을 또 걸면 같은 채팅 응답을 두 개의 살아있는 소켓이
-      // 동시에 받아 화면에 중복으로 쌓이게 된다.
       if (wsRef.current !== ws) return;
       reconnectTimerRef.current = setTimeout(connect, RECONNECT_DELAY_MS);
     };
@@ -157,10 +203,6 @@ export function useJarvisStatus(): UseJarvisStatusResult {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: trimmed }),
       });
-      // 자비스의 응답은 보통 /ws 를 통해 "responded" 이벤트로 push되어
-      // handlePush가 conversationLog에 자동으로 추가한다. "/clear"는 예외 —
-      // 서버가 라우팅을 거치지 않고 즉시 cleared:true로 응답하므로, 방금 위에서
-      // 낙관적으로 추가한 "/clear" 턴까지 포함해 화면을 통째로 비운다.
       const data = (await res.json()) as { cleared?: boolean };
       if (data.cleared) {
         setStatus((prev) => ({ ...prev, conversationLog: [] }));
@@ -168,6 +210,10 @@ export function useJarvisStatus(): UseJarvisStatusResult {
     } catch {
       // 네트워크 오류 시에도 사용자 본인의 발화는 이미 로그에 남아 있다.
     }
+  }, []);
+
+  const clearNavigation = useCallback(() => {
+    setStatus((prev) => ({ ...prev, navigationData: null }));
   }, []);
 
   useEffect(() => {
@@ -187,20 +233,24 @@ export function useJarvisStatus(): UseJarvisStatusResult {
           lastResponse: data.lastResponse,
         }));
       })
-      .catch(() => {
-        // 서버가 아직 안 떴을 수 있음. 초기값 유지하고 WebSocket 재연결에 맡긴다.
-      });
+      .catch(() => {});
 
-    // 디스크에 저장된 이전 대화 기록을 불러와 새로고침/재시작에도 보이게 한다.
     fetch(`${API_BASE}/api/history`)
       .then((res) => res.json() as Promise<HistoryApiResponse>)
       .then((data) => {
         if (cancelled) return;
         setStatus((prev) => ({ ...prev, conversationLog: data }));
       })
-      .catch(() => {
-        // 서버가 아직 안 떴을 수 있음. 빈 기록으로 유지.
-      });
+      .catch(() => {});
+
+    // 카카오 JS 앱 키 로드
+    fetch(`${API_BASE}/api/config`)
+      .then((res) => res.json() as Promise<{ kakaoJsKey: string }>)
+      .then((data) => {
+        if (cancelled) return;
+        setStatus((prev) => ({ ...prev, kakaoJsKey: data.kakaoJsKey }));
+      })
+      .catch(() => {});
 
     connect();
 
@@ -211,5 +261,5 @@ export function useJarvisStatus(): UseJarvisStatusResult {
     };
   }, [connect]);
 
-  return { ...status, sendMessage };
+  return { ...status, sendMessage, clearNavigation };
 }

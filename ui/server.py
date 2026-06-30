@@ -11,6 +11,7 @@ main.py 와 같은 프로세스에서 띄우려면 main.py 에서 uvicorn.Server
 """
 import asyncio
 import logging
+import os
 from contextlib import asynccontextmanager
 
 import psutil
@@ -83,6 +84,7 @@ def _event_to_dict(event: StatusEvent) -> dict:
         },
         "systemInfo": _system_info(),
         "usageToday": descriptor["usagePercent"],
+        "extra": event.extra,
     }
 
 
@@ -238,6 +240,56 @@ def _handle_chat(text: str) -> ChatResponse:
 async def post_chat(req: ChatRequest) -> ChatResponse:
     """채팅 입력을 받아 처리한다. channel="chat"이므로 TTS는 호출되지 않는다."""
     return await asyncio.to_thread(_handle_chat, req.text)
+
+
+@app.get("/api/config")
+def get_config() -> dict:
+    """카카오 JS 앱 키 등 프론트엔드가 필요한 공개 설정값을 반환한다."""
+    return {"kakaoJsKey": os.getenv("KAKAO_JS_API_KEY", "")}
+
+
+class NavigateRequest(BaseModel):
+    destination: str
+    origin: dict  # {"lat": float, "lng": float}
+    routeType: str = "RECOMMEND"
+
+
+@app.post("/api/navigate")
+async def post_navigate(req: NavigateRequest) -> dict:
+    """목적지명 + 현재 위치 + 경로 종류를 받아 카카오맵 경로를 반환한다."""
+    from core import kakao_map_client
+
+    dest = await asyncio.to_thread(kakao_map_client.geocode, req.destination)
+    if not dest:
+        return {"error": f"'{req.destination}' 위치를 찾을 수 없습니다."}
+
+    origin = req.origin
+    route = await asyncio.to_thread(
+        kakao_map_client.directions,
+        float(origin["lat"]),
+        float(origin["lng"]),
+        dest["lat"],
+        dest["lng"],
+        req.routeType,
+    )
+    if not route:
+        return {"error": "경로를 찾을 수 없습니다."}
+
+    dist_km = route["distance"] / 1000
+    dur_min = route["duration"] // 60
+
+    return {
+        "destination": dest,
+        "origin": origin,
+        "routeType": req.routeType,
+        "distance": route["distance"],
+        "duration": route["duration"],
+        "distanceText": f"{dist_km:.1f}km",
+        "durationText": f"{dur_min}분",
+        "vertexes": route["vertexes"],
+        "fareToll": route["fare_toll"],
+        "fareTaxi": route["fare_taxi"],
+    }
 
 
 @app.get("/api/history", response_model=list[HistoryTurn])
