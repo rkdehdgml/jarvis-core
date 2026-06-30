@@ -3,9 +3,17 @@
 기본값은 음성 모드다: "자비스"(Hey Jarvis) 웨이크워드 대기 → STT → 라우팅/실행 → TTS.
 --text 플래그를 주면 마이크 없이 콘솔 텍스트로 동일한 파이프라인을 탈 수 있다
 (디버그용이자, 마이크 인식이 막혔을 때의 수동 대체 경로).
+
+웹 대시보드(ui/server.py)는 기본으로 같은 프로세스 내 데몬 스레드에서 실행된다.
+같은 프로세스이므로 core/status_events.py 의 broadcaster를 공유하며,
+음성/텍스트 루프에서 emit()한 이벤트가 WebSocket을 통해 브라우저에 실시간 반영된다.
+--no-web 플래그로 웹 서버 없이 실행할 수 있다.
 """
 import argparse
 import logging
+import threading
+
+import uvicorn
 
 from core.chat_history import clear_history
 from core.context import ConversationContext
@@ -19,15 +27,12 @@ from voice.text_input import get_input
 logger = logging.getLogger(__name__)
 
 _EXIT_WORD = "종료"
-# "자비스 오프"/"자비스 종료"(공백 유무·뒤에 "해줘" 등이 붙는 것은 허용)로 상시 음성인식을
-# 해제한다. "자비스 크롬 종료해줘"처럼 사이에 다른 말이 끼면 startswith가 막아주므로
-# skill_app_control의 "종료" 트리거와 충돌하지 않는다.
 _DEACTIVATE_PHRASES = ("자비스오프", "자비스종료")
-
-# "채팅 목록 지워줘"류 음성 명령 — 동사와 대상이 같이 있어야 매치된다("이 파일
-# 지워줘"처럼 대상이 없는 일반 삭제 요청과 구분하기 위함).
 _CLEAR_HISTORY_VERBS = ("지워줘", "지워주세요", "삭제해줘", "비워줘", "초기화해줘")
 _CLEAR_HISTORY_TARGETS = ("채팅", "대화", "기록", "목록")
+
+_WEB_HOST = "127.0.0.1"
+_WEB_PORT = 8765
 
 
 def _is_deactivate_command(text: str) -> bool:
@@ -42,16 +47,31 @@ def _is_clear_history_command(text: str) -> bool:
 
 
 def _clear_history(context: ConversationContext) -> None:
-    """현재 프로세스의 대화 맥락과, 웹 대시보드가 읽는 공유 기록 파일을 함께 비운다.
+    """대화 맥락과 기록 파일을 함께 비운다.
 
-    main.py와 ui/server.py는 별도 프로세스라 메모리는 공유하지 않지만,
-    data/chat_history.json은 둘 다 같은 파일을 보므로 "채팅 목록"을 지운다는
-    말의 의미를 지키려면 이 파일도 같이 비워야 한다. 단, 이미 열려 있는 웹
-    브라우저 탭은 새로고침하기 전까진 실시간으로 반영되지 않는다(두 프로세스
-    사이에 별도 통신 채널이 없음 — 알려진 제약).
+    웹 대시보드가 같은 프로세스에서 실행되므로 broadcaster 공유로 음성 결과가
+    자동으로 웹에 반영된다. 단, 웹 챗의 ConversationContext(ui/server.py의
+    _chat_context)는 별도 인스턴스라 브라우저에서 /clear 입력 또는 새로고침으로
+    반영된다.
     """
     context.clear()
     clear_history()
+
+
+def _start_webserver() -> None:
+    """uvicorn을 백그라운드 데몬 스레드로 실행한다.
+
+    같은 프로세스 내 실행이므로 core/status_events.py 의 broadcaster 인스턴스를
+    공유한다. 음성 루프에서 emit()한 이벤트가 ui/server.py 의 _on_status_event
+    콜백을 통해 WebSocket 클라이언트에 자동 전달된다.
+    """
+    uvicorn.run(
+        "ui.server:app",
+        host=_WEB_HOST,
+        port=_WEB_PORT,
+        log_level="warning",
+        access_log=False,
+    )
 
 
 def _run_text_loop(router: Router, dispatcher: Dispatcher, context: ConversationContext) -> None:
@@ -90,8 +110,6 @@ def _run_voice_loop(router: Router, dispatcher: Dispatcher, context: Conversatio
     )
     broadcaster.emit(state="idle")
 
-    # 활성화(웨이크워드/박수) 후에는 follow_up 여부와 무관하게 상시 듣는다.
-    # 해제는 오직 _is_deactivate_command 발화로만 일어난다.
     active = False
     try:
         while True:
@@ -104,7 +122,6 @@ def _run_voice_loop(router: Router, dispatcher: Dispatcher, context: Conversatio
             text = stt.listen()
 
             if not text:
-                # 상시 모드: 침묵/타임아웃이어도 비활성화하지 않고 계속 듣는다.
                 continue
 
             if _is_deactivate_command(text):
@@ -143,9 +160,19 @@ def main() -> None:
     parser.add_argument(
         "--text", action="store_true", help="마이크 없이 콘솔 텍스트 입출력으로 실행"
     )
+    parser.add_argument(
+        "--no-web", action="store_true", help="웹 대시보드 없이 실행"
+    )
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+
+    if not args.no_web:
+        web_thread = threading.Thread(
+            target=_start_webserver, daemon=True, name="jarvis-web"
+        )
+        web_thread.start()
+        print(f"웹 대시보드: http://{_WEB_HOST}:{_WEB_PORT}")
 
     registry = SkillRegistry()
     router = Router(registry)
