@@ -113,14 +113,6 @@ export function JarvisFull() {
         </div>
       </div>
 
-      {status.navigationData && status.kakaoJsKey && (
-        <KakaoMap
-          data={status.navigationData}
-          jsKey={status.kakaoJsKey}
-          onClose={clearNavigation}
-        />
-      )}
-
       <div className="jarvis-full__chat-area">
         <div className="jarvis-full__chat-col">
           {status.currentState === "listening" && (
@@ -163,6 +155,15 @@ export function JarvisFull() {
           <ChatInput onSend={status.sendMessage} />
         </div>
       </div>
+
+      {/* position:fixed — 레이아웃 흐름 밖에서 플로팅 */}
+      {status.navigationData && status.kakaoJsKey && (
+        <KakaoMap
+          data={status.navigationData}
+          jsKey={status.kakaoJsKey}
+          onClose={clearNavigation}
+        />
+      )}
     </div>
   );
 }
