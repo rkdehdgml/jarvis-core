@@ -3,7 +3,7 @@
 Windows 네이티브 한국어 개인 AI 비서. 음성("Hey Jarvis" 또는 박수 두 번) 또는 웹 대시보드 텍스트로 조작합니다.
 
 **AI 엔진**: Groq (`llama-3.3-70b-versatile`) — 빠른 응답, 무료 티어 제공  
-**스킬**: 33개 (자동 등록 — `skills/skill_*.py` 파일만 추가하면 됨)
+**스킬**: 39개 (자동 등록 — `skills/skill_*.py` 파일만 추가하면 됨)
 
 ---
 
@@ -64,6 +64,10 @@ npm run typecheck  # 타입 검사
 | 변수 | 필수 | 설명 |
 |------|------|------|
 | `GROQ_API_KEY` | **필수** | Groq API 키 |
+| `KAKAO_REST_API_KEY` | 선택 | 카카오맵 경로 안내·POI 검색 (developers.kakao.com) |
+| `KAKAO_JS_API_KEY` | 선택 | 카카오맵 웹 지도 표시용 JavaScript 앱 키 |
+| `KAKAO_DEFAULT_LAT` | 선택 | 기본 출발지 위도 (예: `36.3504`) — 미설정 시 브라우저 Geolocation → IP 추정 순 |
+| `KAKAO_DEFAULT_LNG` | 선택 | 기본 출발지 경도 (예: `127.3845`) |
 | `DAEJEON_BUS_API_KEY` | 선택 | 대전광역시 버스 정보 스킬 (data.go.kr 공공데이터포털) |
 | `NEWSAPI_KEY` | 선택 | 뉴스 스킬 (NewsAPI.org 무료 티어, 없으면 안내 문구) |
 | `BRAVE_SEARCH_API_KEY` | 선택 | 웹 검색을 Brave로 전환 (없으면 DuckDuckGo 사용) |
@@ -95,6 +99,42 @@ npm run typecheck  # 타입 검사
 | IP 정보 | "내 IP 알려줘", "IP 주소" | 공인 IP + 위치 정보 |
 | 위치 | "내 위치 알려줘" | IP 기반 위치 |
 | 인터넷 속도 | "속도 측정", "인터넷 빠른지 확인해줘" | Cloudflare 엔드포인트, 키 불필요 |
+
+### 카카오맵 경로 안내 & POI 검색
+
+`KAKAO_REST_API_KEY` + `KAKAO_JS_API_KEY` 필요 (developers.kakao.com 앱 등록 후 발급)
+
+웹 대시보드(`http://localhost:5173` 또는 `:8765`)에서 드래그 가능한 플로팅 지도 창으로 표시됩니다.
+
+**경로 안내**
+
+| 발화 | 동작 |
+|------|------|
+| "서울역까지 경로 알려줘" | 현재 위치 → 서울역 최적 경로, 지도·거리·시간·통행료 표시 |
+| "대전IC에서 서울까지 최단 시간 경로" | 출발지 명시 지원 (에서/부터) |
+| "강남역으로 무료도로 우선으로 안내해줘" | 경로 유형: 추천·최단시간·최단거리·무료도로 |
+| 검색 결과 여러 개일 때 | "어느 곳으로 안내할까요?" 후보 목록 표시 → 번호 선택 |
+
+- 출발지 결정 순서: ① 발화 내 명시 (`대전역에서`) → ② `.env` `KAKAO_DEFAULT_LAT/LNG` → ③ 브라우저 Geolocation → ④ IP 위치 추정
+- 새 경로 검색 시 지도 자동 교체, 이전 경로 제거
+
+**경로 주변 POI 검색**
+
+| 발화 | 동작 |
+|------|------|
+| "경로에 주유소 표시해줘" | 경로 500m 이내 주유소 마커 표시 |
+| "가는 길에 카페 어디 있어?" | 카페 레이어 추가 (기존 마커 유지) |
+| "경로 주변 전체 표시해줘" | 주유소·음식점·카페·편의점·화장실·주차장·병원·약국 8개 카테고리 동시 검색 |
+| "주변 편의점 찾아줘" | 경로 없을 때 현재 위치 기준 검색 |
+
+- **다중 레이어**: 카테고리별 색상 구분, 각 레이어를 독립적으로 켜고 끌 수 있음
+- **3단계 반경 확장**: 경로 500m 이내 없으면 2km → 5km 자동 확대
+- **마커 클릭**: 장소명·주소·전화번호·경로로부터 거리 팝업 표시
+- **카테고리당 최대 50개** 표시
+
+지원 POI 카테고리: 주유소/충전소, 음식점(한식·중식·일식·양식), 카페, 편의점, 마트, 주차장, 병원, 약국, 은행, 화장실, 휴게소
+
+---
 
 ### 대전광역시 버스 정보
 
@@ -252,6 +292,7 @@ jarvis-core/
 │   ├── dispatcher.py          # 스킬 실행 + 예외 격리
 │   ├── context.py             # 대화 맥락 (최근 20턴)
 │   ├── skill_base.py          # Skill ABC, SkillResult 정의
+│   ├── kakao_map_client.py    # 카카오 Directions·Local API 클라이언트
 │   ├── bus_client.py          # 대전 버스 도착정보 API (getArrInfoByStopID)
 │   ├── buspos_client.py       # 대전 버스 실시간 위치 API (getBusPosByRtid)
 │   └── busstop_client.py      # 대전 버스정류소 검색 API + BIS 캐시
@@ -265,10 +306,17 @@ jarvis-core/
 │   ├── wakeword.py            # openWakeWord + ClapDetector 레이스
 │   └── clap_detector.py       # 박수 감지 (독립 유닛)
 ├── ui/
-│   ├── server.py              # FastAPI (GET /api/status, POST /api/chat, WS /ws)
+│   ├── server.py              # FastAPI (GET /api/status, POST /api/chat, WS /ws, POST /api/navigate, POST /api/navigate/poi)
 │   └── web/                   # React 18 + TypeScript + Vite 프론트엔드
-├── skills/                    # ⭐ 기능 파일 — 여기에만 추가 (33개)
+│       ├── components/
+│       │   ├── KakaoMap.tsx              # 드래그 플로팅 지도 창 + POI 레이어
+│       │   └── NavigationCandidates.tsx  # 동명 장소 후보 선택 UI
+│       └── hooks/
+│           └── useJarvisStatus.ts        # WS 상태 훅 (내비·POI 상태 포함)
+├── skills/                    # ⭐ 기능 파일 — 여기에만 추가 (39개)
 │   ├── agent_tools/           # 에이전트 전용 도구 패키지
+│   ├── skill_navigation.py    # 카카오맵 경로 안내 (출발지·목적지·경로 유형)
+│   ├── skill_poi_search.py    # 경로 주변 POI 검색 (주유소·음식점·카페 등)
 │   ├── skill_bus_tracker.py   # 대전 버스 도착정보·실시간 위치 추적
 │   ├── skill_agent.py         # Groq tool-calling 에이전트
 │   ├── skill_ai_chat.py       # AI 대화 폴백
