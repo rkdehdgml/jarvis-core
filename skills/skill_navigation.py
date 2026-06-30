@@ -31,29 +31,39 @@ _ROUTE_LABELS = {
 }
 
 
+def _clean_dest(dest: str) -> str:
+    for kw in _ROUTE_TYPE_MAP:
+        dest = dest.replace(kw, "")
+    dest = re.sub(r"\s*(알려줘|알려주세요|안내해줘|보여줘|찾아줘|검색해줘|해줘)\s*$", "", dest)
+    return re.sub(r"\s+", " ", dest).strip()
+
+
 def _extract_destination(text: str) -> str | None:
     # "XX까지" 패턴
     m = re.search(r"(.+?)까지", text)
     if m:
-        dest = m.group(1).strip()
-        dest = re.sub(r"^(경로|내비|네비|길|안내|검색|찾아)\s*", "", dest).strip()
+        dest = _clean_dest(re.sub(r"^(경로|내비|네비|길|안내|검색|찾아)\s*", "", m.group(1)).strip())
         if dest and len(dest) >= 2:
             return dest
 
-    # "XX 가는 길" / "XX로 경로"
+    # "XX 가는 길" / "XX로 경로/가자/가줘"
     m = re.search(r"(.+?)\s*(?:가는\s*길|가는길|(?:로|으로)\s*(?:경로|가자|가줘|가려면))", text)
     if m:
-        dest = m.group(1).strip()
+        dest = _clean_dest(m.group(1))
         if dest and len(dest) >= 2:
             return dest
 
-    # "경로 XX" / "내비 XX"
+    # "경로 XX" / "내비 XX" — 트리거 뒤에 목적지
     m = re.search(r"(?:경로|내비|네비|길안내|길 안내)\s+(.+?)(?:까지|로|으로|$)", text)
     if m:
-        dest = m.group(1).strip()
-        # 경로 타입 키워드 제거
-        for kw in _ROUTE_TYPE_MAP:
-            dest = dest.replace(kw, "").strip()
+        dest = _clean_dest(m.group(1))
+        if dest and len(dest) >= 2:
+            return dest
+
+    # "XX 경로" / "XX 내비" — 목적지 뒤에 트리거 (가장 흔한 구어체)
+    m = re.search(r"(.+?)\s+(?:경로|루트|내비|네비|길안내|길 안내)(?:\s|$)", text)
+    if m:
+        dest = _clean_dest(m.group(1))
         if dest and len(dest) >= 2:
             return dest
 
@@ -78,8 +88,8 @@ class NavigationSkill(Skill):
             return 0.0
         if _extract_destination(text):
             return 0.85
-        # 트리거는 있지만 목적지 불명확
-        return 0.35
+        # 트리거는 있지만 목적지 불명확 — AI 폴백 대신 스킬이 직접 되물음
+        return 0.5
 
     def execute(self, text: str, context: dict) -> SkillResult:
         destination = _extract_destination(text)
