@@ -3,7 +3,7 @@
 Windows 네이티브 한국어 개인 AI 비서. 음성("Hey Jarvis" 또는 박수 두 번) 또는 웹 대시보드 텍스트로 조작합니다.
 
 **AI 엔진**: Groq (`llama-3.3-70b-versatile`) — 빠른 응답, 무료 티어 제공  
-**스킬**: 32개 (자동 등록 — `skills/skill_*.py` 파일만 추가하면 됨)
+**스킬**: 33개 (자동 등록 — `skills/skill_*.py` 파일만 추가하면 됨)
 
 ---
 
@@ -32,28 +32,30 @@ copy .env.example .env
 # .env 파일을 열어 GROQ_API_KEY 입력 (필수)
 # 나머지 키는 해당 스킬을 쓸 때만 필요
 
-# 4. 실행 — 음성 모드
+# 4. 실행 — 음성 + 웹 대시보드 동시 실행 (기본)
 python main.py
 
-# 4'. 실행 — 텍스트 모드 (마이크 없이)
+# 4'. 실행 — 텍스트 + 웹 대시보드 (마이크 없이)
 python main.py --text
+
+# 4''. 실행 — 웹 대시보드 없이 음성만
+python main.py --no-web
 ```
 
-### 웹 대시보드 (별도 프로세스)
+> `python main.py` 하나로 **음성 루프와 웹 대시보드(포트 8765)가 동시에 실행**됩니다.  
+> 두 프로세스가 같은 `broadcaster`를 공유하므로 음성 명령 결과가 브라우저에 실시간 반영됩니다.
 
-```powershell
-uvicorn ui.server:app --host 127.0.0.1 --port 8765
-```
-
-브라우저에서 `http://localhost:5173` (Vite 개발 서버) 또는 빌드 후 `http://localhost:8765` 접속.
+### 웹 대시보드 프론트엔드
 
 ```powershell
 cd ui\web
 npm install
-npm run dev        # http://localhost:5173
+npm run dev        # Vite 개발 서버: http://localhost:5173
 npm run build      # 프로덕션 빌드
 npm run typecheck  # 타입 검사
 ```
+
+빌드 후에는 `http://localhost:8765` 로 바로 접속 가능합니다.
 
 ---
 
@@ -62,6 +64,7 @@ npm run typecheck  # 타입 검사
 | 변수 | 필수 | 설명 |
 |------|------|------|
 | `GROQ_API_KEY` | **필수** | Groq API 키 |
+| `DAEJEON_BUS_API_KEY` | 선택 | 대전광역시 버스 정보 스킬 (data.go.kr 공공데이터포털) |
 | `NEWSAPI_KEY` | 선택 | 뉴스 스킬 (NewsAPI.org 무료 티어, 없으면 안내 문구) |
 | `BRAVE_SEARCH_API_KEY` | 선택 | 웹 검색을 Brave로 전환 (없으면 DuckDuckGo 사용) |
 | `GMAIL_ADDRESS` | 선택 | 이메일 스킬용 Gmail 주소 |
@@ -92,6 +95,31 @@ npm run typecheck  # 타입 검사
 | IP 정보 | "내 IP 알려줘", "IP 주소" | 공인 IP + 위치 정보 |
 | 위치 | "내 위치 알려줘" | IP 기반 위치 |
 | 인터넷 속도 | "속도 측정", "인터넷 빠른지 확인해줘" | Cloudflare 엔드포인트, 키 불필요 |
+
+### 대전광역시 버스 정보
+
+`DAEJEON_BUS_API_KEY` 필요 (data.go.kr 공공데이터포털 발급)
+
+| 발화 | 동작 |
+|------|------|
+| "샘머리아파트정류장 버스 정보 알려줘" | 해당 정류장 도착 예정 버스 목록 표시 |
+| "① 추적해줘" / "102번 추적해줘" | 목록에서 선택한 버스를 정류장 도착까지 반복 추적 |
+| "911 버스 위치 정보 알려줘" | 버스 번호만으로 즉시 추적 시작 (저장된 정류소 자동 탐색) |
+| "911번 버스 현재 위치는 어디야" | 911번 버스 현재 정류소 위치 1회 조회 |
+| "버스 추적 중단" | 진행 중인 추적 중지 |
+| "정류소 저장 갈마역 8001234" | 정류소 ID 저장 (이후 이름으로 바로 조회 가능) |
+
+**추적 알림 방식**
+- 추적 시작 시 현황 1회 표시 (현재 위치, 남은 정류장 수, 예상 도착 시간)
+- 버스가 이동해 정류장 수가 바뀔 때마다 `[버스 알림]` 표시
+- `OO정류소에서 XX정류소로 이동 중` 형식으로 이동 경로 표시
+- 버스가 도착하면 자동으로 추적 종료
+- 웹 대시보드에 실시간 반영 (WebSocket)
+
+**정류소 등록 방법**
+1. 카카오버스·네이버 지도 앱에서 정류소 검색 → ID 확인
+2. "정류소 저장 [이름] [ID]" 발화로 등록
+3. 이후 이름만으로 조회 가능 (자동 저장)
 
 ### PC 제어
 
@@ -211,7 +239,7 @@ npm run typecheck  # 타입 검사
 
 ```
 jarvis-core/
-├── main.py                    # 진입점 (음성/텍스트 루프, 슬립 모드 처리)
+├── main.py                    # 진입점 (음성+웹 동시 실행, --text / --no-web 플래그)
 ├── config/
 │   ├── settings.yaml          # 설정 참조 (주요 값은 코드 상수로 관리)
 │   └── persona.md             # 자비스 성격·응답 지침 (AI 시스템 프롬프트)
@@ -223,7 +251,10 @@ jarvis-core/
 │   ├── router.py              # 라우팅 (can_handle 최고 점수 ≥ 0.4 선택)
 │   ├── dispatcher.py          # 스킬 실행 + 예외 격리
 │   ├── context.py             # 대화 맥락 (최근 20턴)
-│   └── skill_base.py          # Skill ABC, SkillResult 정의
+│   ├── skill_base.py          # Skill ABC, SkillResult 정의
+│   ├── bus_client.py          # 대전 버스 도착정보 API (getArrInfoByStopID)
+│   ├── buspos_client.py       # 대전 버스 실시간 위치 API (getBusPosByRtid)
+│   └── busstop_client.py      # 대전 버스정류소 검색 API + BIS 캐시
 ├── commands/                  # Windows OS 위임 카탈로그
 │   ├── registry.py            # COMMAND_MAP + register()
 │   ├── windows_bridge.py      # subprocess·shell·ffmpeg 래퍼
@@ -236,13 +267,10 @@ jarvis-core/
 ├── ui/
 │   ├── server.py              # FastAPI (GET /api/status, POST /api/chat, WS /ws)
 │   └── web/                   # React 18 + TypeScript + Vite 프론트엔드
-├── skills/                    # ⭐ 기능 파일 — 여기에만 추가 (32개)
-│   ├── agent_tools/           # 에이전트 전용 도구 패키지 (SkillRegistry 스캔 제외)
-│   │   ├── browser_tool.py    # requests+BeautifulSoup4 웹 페이지 추출
-│   │   ├── search_tool.py     # DuckDuckGo 검색
-│   │   ├── file_tool.py       # txt/json/xlsx 파일 저장
-│   │   └── reporter_tool.py   # TTS 콜백 진행 보고
-│   ├── skill_agent.py         # Groq tool-calling 에이전트 (조사·수집·저장)
+├── skills/                    # ⭐ 기능 파일 — 여기에만 추가 (33개)
+│   ├── agent_tools/           # 에이전트 전용 도구 패키지
+│   ├── skill_bus_tracker.py   # 대전 버스 도착정보·실시간 위치 추적
+│   ├── skill_agent.py         # Groq tool-calling 에이전트
 │   ├── skill_ai_chat.py       # AI 대화 폴백
 │   ├── skill_web_search.py    # 웹 검색
 │   ├── skill_weather.py       # 날씨
@@ -274,10 +302,12 @@ jarvis-core/
 │   ├── skill_howto.py         # 방법 안내
 │   ├── skill_qr.py            # QR 코드
 │   └── skill_joke.py          # 농담
-├── tests/                     # assert 기반 단위 테스트 (38개)
+├── tests/                     # assert 기반 단위 테스트
 ├── data/                      # 런타임 데이터
 │   ├── contacts.json          # 연락처
 │   ├── schedule.json          # 일정
+│   ├── bus_config.json        # 저장된 버스 정류소 목록
+│   ├── daejeon_bis_stops.json # 대전 BIS 정류소 캐시
 │   └── groq_usage.json        # Groq 토큰 사용량
 ├── .env.example               # 환경변수 템플릿
 ├── requirements.txt
@@ -336,3 +366,4 @@ python -m tests.test_agent_e2e      # 엔드투엔드 시나리오 3개
 - **Gmail 앱 비밀번호**: 구글 계정 비밀번호가 아닌 "앱 비밀번호"를 사용하세요 (2단계 인증 필요).
 - **슬립 모드**: 음성인식만 중단됩니다. 재활성화하려면 "Hey Jarvis" 또는 박수 두 번을 사용하세요.
 - **에이전트 파일 저장**: 에이전트가 생성한 파일은 바탕화면에 저장됩니다. 불필요한 경우 직접 삭제하세요.
+- **버스 스킬**: `DAEJEON_BUS_API_KEY` 없이 실행해도 다른 기능에는 영향 없습니다. 버스 관련 발화 시에만 안내 메시지가 표시됩니다.
