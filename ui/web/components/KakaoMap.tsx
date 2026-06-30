@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
-import type { NavigationData } from "../hooks/useJarvisStatus";
+import type { NavigationData, PoiResult } from "../hooks/useJarvisStatus";
 
 declare global {
   interface Window {
@@ -12,8 +12,25 @@ declare global {
 interface KakaoMapProps {
   data: NavigationData;
   jsKey: string;
+  poiResults?: PoiResult[];
   onClose: () => void;
+  onClearPoi?: () => void;
+  onClearPoiLayer?: (categoryCode: string) => void;
 }
+
+// 카테고리 코드 → 마커 배경색
+const POI_COLOR: Record<string, string> = {
+  OL7: "#f59e0b",  // 주유소
+  FD6: "#ef4444",  // 음식점
+  CE7: "#92400e",  // 카페
+  CS2: "#22c55e",  // 편의점
+  MT1: "#3b82f6",  // 마트
+  PK6: "#6b7280",  // 주차장
+  HP8: "#ec4899",  // 병원
+  PM9: "#8b5cf6",  // 약국
+  BK9: "#0ea5e9",  // 은행
+};
+const POI_COLOR_DEFAULT = "#64748b";
 
 const ROUTE_TYPE_LABEL: Record<string, string> = {
   RECOMMEND: "추천",
@@ -22,9 +39,10 @@ const ROUTE_TYPE_LABEL: Record<string, string> = {
   TOLL_FREE: "무료도로 우선",
 };
 
-export function KakaoMap({ data, jsKey, onClose }: KakaoMapProps) {
+export function KakaoMap({ data, jsKey, poiResults = [], onClose, onClearPoi, onClearPoiLayer }: KakaoMapProps) {
   const mapCanvasRef = useRef<HTMLDivElement>(null);
   const mapInstanceRef = useRef<any>(null);
+  const poiOverlaysRef = useRef<any[]>([]);
 
   // position은 ref + state 분리 — 드래그 중 ref만 업데이트하고 mouseup 후 state 반영
   const posRef = useRef({
@@ -92,14 +110,17 @@ export function KakaoMap({ data, jsKey, onClose }: KakaoMapProps) {
       roCleanup = () => ro.disconnect();
     };
 
+    // autoload=false 이므로 스크립트 로드 후 kakao.maps.load()를 통해 지도 모듈을 초기화해야 함
+    const initMapWhenReady = () => window.kakao.maps.load(initMap);
+
     if (window.kakao?.maps) {
-      initMap();
+      initMapWhenReady();
     } else {
       const existing = document.getElementById("kakao-maps-sdk");
       if (existing) {
-        existing.addEventListener("load", initMap);
+        existing.addEventListener("load", initMapWhenReady);
         return () => {
-          existing.removeEventListener("load", initMap);
+          existing.removeEventListener("load", initMapWhenReady);
           roCleanup?.();
         };
       }
@@ -107,7 +128,7 @@ export function KakaoMap({ data, jsKey, onClose }: KakaoMapProps) {
       script.id = "kakao-maps-sdk";
       script.src = `//dapi.kakao.com/v2/maps/sdk.js?appkey=${jsKey}&autoload=false`;
       script.async = true;
-      script.onload = initMap;
+      script.onload = initMapWhenReady;
       document.head.appendChild(script);
     }
 
@@ -148,6 +169,95 @@ export function KakaoMap({ data, jsKey, onClose }: KakaoMapProps) {
     };
   }, []);
 
+  // ── POI 마커 (카테고리별 레이어 전체 재렌더) ─────────────────────────────
+  useEffect(() => {
+    const map = mapInstanceRef.current;
+    if (!map || !window.kakao?.maps) return;
+
+    // 기존 POI 오버레이 전체 제거 후 재생성
+    poiOverlaysRef.current.forEach((o) => o.setMap(null));
+    poiOverlaysRef.current = [];
+
+    if (poiResults.length === 0) return;
+
+    for (const layer of poiResults) {
+      const color = POI_COLOR[layer.categoryCode] ?? POI_COLOR_DEFAULT;
+
+      for (const poi of layer.pois) {
+        try {
+          const pos = new window.kakao.maps.LatLng(poi.lat, poi.lng);
+          const distKm = (poi.distance / 1000).toFixed(1);
+
+          // 말풍선 레이블 (DOM 요소 — 문자열 전달 시 getContent()가 string 반환해 addEventListener 불가)
+          const labelEl = document.createElement("div");
+          labelEl.style.cssText = [
+            "position:relative",
+            `background:${color}`,
+            "color:#fff",
+            "border-radius:4px",
+            "padding:3px 6px",
+            "font-size:11px",
+            "font-weight:bold",
+            "white-space:nowrap",
+            "box-shadow:0 2px 6px rgba(0,0,0,.4)",
+            "cursor:pointer",
+            "user-select:none",
+          ].join(";");
+          labelEl.textContent = poi.name;
+
+          // 삼각형 꼬리
+          const tail = document.createElement("div");
+          tail.style.cssText = [
+            "position:absolute",
+            "bottom:-5px",
+            "left:50%",
+            "transform:translateX(-50%)",
+            "width:0",
+            "height:0",
+            `border-left:5px solid transparent`,
+            `border-right:5px solid transparent`,
+            `border-top:5px solid ${color}`,
+          ].join(";");
+          labelEl.appendChild(tail);
+
+          const overlay = new window.kakao.maps.CustomOverlay({
+            position: pos,
+            content: labelEl,
+            yAnchor: 1.3,
+            zIndex: 3,
+          });
+          overlay.setMap(map);
+
+          // 클릭 → InfoWindow
+          const infoEl = document.createElement("div");
+          infoEl.style.cssText = "padding:6px 10px;font-size:11px;color:#111;line-height:1.6;white-space:nowrap;min-width:160px;";
+          const nameB = document.createElement("b");
+          nameB.textContent = poi.name;
+          infoEl.appendChild(nameB);
+          infoEl.appendChild(document.createElement("br"));
+          infoEl.appendChild(document.createTextNode(poi.address));
+          if (poi.phone) {
+            infoEl.appendChild(document.createElement("br"));
+            infoEl.appendChild(document.createTextNode(`📞 ${poi.phone}`));
+          }
+          infoEl.appendChild(document.createElement("br"));
+          infoEl.appendChild(document.createTextNode(`경로에서 약 ${distKm}km`));
+
+          const iw = new window.kakao.maps.InfoWindow({
+            content: infoEl,
+            position: pos,
+            removable: true,
+          });
+          labelEl.addEventListener("click", () => iw.open(map));
+
+          poiOverlaysRef.current.push(overlay);
+        } catch (err) {
+          console.warn("POI 마커 생성 실패:", err);
+        }
+      }
+    }
+  }, [poiResults]);
+
   const routeLabel = ROUTE_TYPE_LABEL[data.routeType] ?? data.routeType;
 
   return (
@@ -182,6 +292,33 @@ export function KakaoMap({ data, jsKey, onClose }: KakaoMapProps) {
           {data.fareTaxi > 0 && (
             <div className="kakao-map-info__taxi">
               예상 택시 {data.fareTaxi.toLocaleString()}원
+            </div>
+          )}
+          {poiResults.length > 0 && (
+            <div className="kakao-map-info__poi-layers">
+              {poiResults.map((layer) => (
+                <div key={layer.categoryCode || layer.categoryName} className="kakao-map-info__poi">
+                  <span
+                    className="kakao-map-info__poi-dot"
+                    style={{ background: POI_COLOR[layer.categoryCode] ?? POI_COLOR_DEFAULT }}
+                  />
+                  <span className="kakao-map-info__poi-name">
+                    {layer.categoryName} {layer.pois.length}개
+                    {!layer.onRoute && ` (${(layer.searchRadiusM / 1000).toFixed(1)}km)`}
+                  </span>
+                  <button
+                    className="kakao-map-info__poi-clear"
+                    onClick={() => onClearPoiLayer?.(layer.categoryCode)}
+                    type="button"
+                    title="이 레이어 제거"
+                  >
+                    ✕
+                  </button>
+                </div>
+              ))}
+              <button className="kakao-map-info__poi-clearall" onClick={onClearPoi} type="button">
+                전체 지우기
+              </button>
             </div>
           )}
         </div>

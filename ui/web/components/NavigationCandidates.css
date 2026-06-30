@@ -1,0 +1,98 @@
+.nav-candidates {
+  margin: 8px 0 0;
+  border: 1px solid #1a3a4a;
+  border-radius: 8px;
+  background: #03060c;
+  overflow: hidden;
+  font-family: "JetBrains Mono", "Consolas", monospace;
+}
+
+.nav-candidates__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  background: #0a1628;
+  border-bottom: 1px solid #1a3a4a;
+}
+
+.nav-candidates__title {
+  font-size: 12px;
+  color: #2dd4ee;
+  font-weight: bold;
+}
+
+.nav-candidates__cancel {
+  background: none;
+  border: none;
+  color: #4a6a7a;
+  cursor: pointer;
+  font-size: 13px;
+  padding: 0;
+  line-height: 1;
+}
+
+.nav-candidates__cancel:hover {
+  color: #e6f7fb;
+}
+
+.nav-candidates__list {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+}
+
+.nav-candidates__item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  padding: 8px 12px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  text-align: left;
+  transition: background 0.15s;
+}
+
+.nav-candidates__item:hover {
+  background: #0a1628;
+}
+
+.nav-candidates__num {
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #1a3a4a;
+  color: #2dd4ee;
+  font-size: 11px;
+  font-weight: bold;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.nav-candidates__info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.nav-candidates__name {
+  font-size: 12px;
+  font-weight: bold;
+  color: #e6f7fb;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.nav-candidates__addr {
+  font-size: 10px;
+  color: #4a6a7a;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}

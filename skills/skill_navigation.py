@@ -38,13 +38,35 @@ def _clean_dest(dest: str) -> str:
     return re.sub(r"\s+", " ", dest).strip()
 
 
-def _extract_destination(text: str) -> str | None:
-    # "XX까지" 패턴
-    m = re.search(r"(.+?)까지", text)
+def _extract_origin(text: str) -> str | None:
+    """발화에서 출발지 추출. "XX에서 YY까지" / "XX부터 YY까지" 패턴."""
+    m = re.search(r"(.+?)\s*(?:에서|부터)\s+.+?(?:까지|로|으로|경로|내비|네비)", text)
     if m:
-        dest = _clean_dest(re.sub(r"^(경로|내비|네비|길|안내|검색|찾아)\s*", "", m.group(1)).strip())
+        origin = _clean_dest(m.group(1))
+        # 백트래킹으로 "에서에서" 같은 경우 trailing "에서"/"부터"가 붙을 수 있어 제거
+        origin = re.sub(r"(?:에서|부터)\s*$", "", origin).strip()
+        if origin and len(origin) >= 2:
+            return origin
+    return None
+
+
+def _extract_destination(text: str) -> str | None:
+    # "XX에서 YY까지" — "에서" 이후만 목적지로 사용
+    m = re.search(r".+?(?:에서|부터)\s+(.+?)까지", text)
+    if m:
+        dest = _clean_dest(m.group(1))
         if dest and len(dest) >= 2:
             return dest
+
+    # "XX까지" 패턴 (출발지 없는 경우)
+    m = re.search(r"(.+?)까지", text)
+    if m:
+        candidate = m.group(1)
+        # "에서" 포함 → 위 패턴에서 이미 처리됐어야 하므로 스킵
+        if "에서" not in candidate and "부터" not in candidate:
+            dest = _clean_dest(re.sub(r"^(경로|내비|네비|길|안내|검색|찾아)\s*", "", candidate).strip())
+            if dest and len(dest) >= 2:
+                return dest
 
     # "XX 가는 길" / "XX로 경로/가자/가줘"
     m = re.search(r"(.+?)\s*(?:가는\s*길|가는길|(?:로|으로)\s*(?:경로|가자|가줘|가려면))", text)
@@ -99,16 +121,18 @@ class NavigationSkill(Skill):
                 success=False,
             )
 
+        origin_name = _extract_origin(text)
         route_type = _extract_route_type(text)
         label = _ROUTE_LABELS.get(route_type, "추천")
 
+        origin_clause = f"{origin_name}에서 " if origin_name else ""
         broadcaster.emit(
             state="navigation_request",
-            last_response=f"{destination}까지 {label} 경로를 웹 대시보드에 표시합니다.",
-            extra={"destination": destination, "routeType": route_type},
+            last_response=f"{origin_clause}{destination}까지 {label} 경로를 웹 대시보드에 표시합니다.",
+            extra={"destination": destination, "routeType": route_type, "originName": origin_name},
         )
 
         return SkillResult(
-            speech=f"{destination}까지 {label} 경로를 검색합니다. 웹 대시보드에서 확인해 주세요.",
+            speech=f"{origin_clause}{destination}까지 {label} 경로를 검색합니다. 웹 대시보드에서 확인해 주세요.",
             success=True,
         )

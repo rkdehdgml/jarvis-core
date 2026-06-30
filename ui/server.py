@@ -245,25 +245,83 @@ async def post_chat(req: ChatRequest) -> ChatResponse:
 @app.get("/api/config")
 def get_config() -> dict:
     """카카오 JS 앱 키 등 프론트엔드가 필요한 공개 설정값을 반환한다."""
-    return {"kakaoJsKey": os.getenv("KAKAO_JS_API_KEY", "")}
+    config: dict = {"kakaoJsKey": os.getenv("KAKAO_JS_API_KEY", "")}
+    # 데스크톱 브라우저 Geolocation은 GPS 없이 IP 기반 추정이라 오차가 크다.
+    # .env에 KAKAO_DEFAULT_LAT/KAKAO_DEFAULT_LNG를 설정하면 Geolocation 대신 이 좌표를 사용한다.
+    lat = os.getenv("KAKAO_DEFAULT_LAT")
+    lng = os.getenv("KAKAO_DEFAULT_LNG")
+    if lat and lng:
+        config["defaultOrigin"] = {"lat": float(lat), "lng": float(lng)}
+    return config
+
+
+def _ip_geocode() -> dict | None:
+    """공개 IP로 현재 위치를 도시 수준으로 추정한다 (ip-api.com, 무료·키 불필요)."""
+    import requests as _requests
+    try:
+        r = _requests.get(
+            "http://ip-api.com/json/?lang=en&fields=status,lat,lon",
+            timeout=5,
+        )
+        data = r.json()
+        if data.get("status") == "success":
+            return {"lat": data["lat"], "lng": data["lon"]}
+    except Exception as exc:
+        logger.warning(f"IP 지오코딩 실패: {exc}")
+    return None
 
 
 class NavigateRequest(BaseModel):
     destination: str
-    origin: dict  # {"lat": float, "lng": float}
+    origin: dict | None = None       # {"lat": float, "lng": float} — 프론트엔드 Geolocation 결과
+    originName: str | None = None    # 발화로 명시한 출발지 장소명 ("대전역에서 …")
     routeType: str = "RECOMMEND"
+    # 사용자가 후보 중 하나를 선택한 경우 — 이 값이 있으면 geocoding 없이 그대로 사용
+    destinationLat: float | None = None
+    destinationLng: float | None = None
 
 
 @app.post("/api/navigate")
 async def post_navigate(req: NavigateRequest) -> dict:
-    """목적지명 + 현재 위치 + 경로 종류를 받아 카카오맵 경로를 반환한다."""
+    """목적지명 + 출발지(장소명 or 좌표 or IP 추정) + 경로 종류를 받아 카카오맵 경로를 반환한다.
+
+    목적지 결정:
+    - destinationLat/Lng 있음 → 사용자가 후보 선택 완료 → 그대로 사용
+    - 없음 → geocode_candidates 호출:
+        1개 → 바로 경로 탐색
+        2개 이상 → {"candidates": [...]} 반환해 프론트엔드가 사용자에게 선택 요청
+
+    출발지 결정 우선순위:
+    1. originName 있음 → 카카오 로컬 API로 geocode
+    2. origin 좌표 있음 → 그대로 사용 (Geolocation or .env 기본값)
+    3. 둘 다 없음 → 공개 IP로 도시 수준 추정
+    """
     from core import kakao_map_client
 
-    dest = await asyncio.to_thread(kakao_map_client.geocode, req.destination)
-    if not dest:
-        return {"error": f"'{req.destination}' 위치를 찾을 수 없습니다."}
+    # ── 목적지 결정 ──────────────────────────────────────────────────────────
+    if req.destinationLat is not None and req.destinationLng is not None:
+        dest: dict = {"lat": req.destinationLat, "lng": req.destinationLng, "name": req.destination}
+    else:
+        candidates = await asyncio.to_thread(kakao_map_client.geocode_candidates, req.destination)
+        if not candidates:
+            return {"error": f"'{req.destination}' 위치를 찾을 수 없습니다."}
+        if len(candidates) > 1:
+            return {"candidates": candidates}
+        dest = candidates[0]
 
-    origin = req.origin
+    if req.originName:
+        origin_geo = await asyncio.to_thread(kakao_map_client.geocode, req.originName)
+        if not origin_geo:
+            return {"error": f"출발지 '{req.originName}'를 찾을 수 없습니다."}
+        origin: dict = {"lat": origin_geo["lat"], "lng": origin_geo["lng"]}
+    elif req.origin:
+        origin = req.origin
+    else:
+        ip_loc = await asyncio.to_thread(_ip_geocode)
+        if not ip_loc:
+            return {"error": "현재 위치를 확인할 수 없습니다. '대전역에서 서울까지 경로'처럼 출발지를 직접 말씀해 주세요."}
+        origin = ip_loc
+
     route = await asyncio.to_thread(
         kakao_map_client.directions,
         float(origin["lat"]),
@@ -290,6 +348,68 @@ async def post_navigate(req: NavigateRequest) -> dict:
         "fareToll": route["fare_toll"],
         "fareTaxi": route["fare_taxi"],
     }
+
+
+class PoiCategoryItem(BaseModel):
+    categoryCode: str | None = None
+    keyword: str | None = None
+    categoryName: str = "장소"
+
+
+class PoiRequest(BaseModel):
+    categories: list[PoiCategoryItem] = []  # 다중 카테고리 (우선)
+    # 하위 호환: 단일 카테고리 필드
+    categoryCode: str | None = None
+    keyword: str | None = None
+    vertexes: list[list[float]] = []  # [[lng, lat], ...] — 경로 없으면 IP 기반 검색
+
+
+@app.post("/api/navigate/poi")
+async def post_navigate_poi(req: PoiRequest) -> dict:
+    """경로(또는 현재 위치) 주변 POI를 검색한다.
+
+    vertexes 있음 → 경로 따라 샘플 검색 (500m → 2km → 5km 단계적 확장)
+    vertexes 없음 → IP 지오코딩으로 현재 도시 기준 검색
+
+    반환: {"results": [{"categoryCode", "categoryName", "pois", "searchRadiusM", "onRoute"}, ...]}
+    """
+    from core import kakao_map_client
+
+    vertexes = req.vertexes
+    if not vertexes:
+        ip_loc = await asyncio.to_thread(_ip_geocode)
+        if ip_loc:
+            vertexes = [[ip_loc["lng"], ip_loc["lat"]]]
+
+    # categories 미지정 시 단일 카테고리 필드로 구성
+    categories = req.categories or [
+        PoiCategoryItem(categoryCode=req.categoryCode, keyword=req.keyword, categoryName="장소")
+    ]
+
+    async def _search_one(cat: PoiCategoryItem) -> dict:
+        pois, radius = await asyncio.to_thread(
+            kakao_map_client.search_pois_along_route,
+            vertexes,
+            cat.categoryCode,
+            cat.keyword,
+        )
+        return {
+            "categoryCode": cat.categoryCode or "",
+            "categoryName": cat.categoryName,
+            "pois": pois,
+            "searchRadiusM": radius,
+            "onRoute": radius <= 500,
+        }
+
+    results = await asyncio.gather(*[_search_one(c) for c in categories])
+    # 결과 없는 카테고리 필터링
+    found = [r for r in results if r["pois"]]
+
+    if not found:
+        names = "·".join(c.categoryName for c in categories)
+        return {"results": [], "error": f"경로 반경 5km 내에서 {names}을 찾지 못했습니다."}
+
+    return {"results": found}
 
 
 @app.get("/api/history", response_model=list[HistoryTurn])

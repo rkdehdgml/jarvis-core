@@ -4,6 +4,7 @@ import { useJarvisStatus, type JarvisState } from "../hooks/useJarvisStatus";
 import { useMicLevels } from "../hooks/useMicLevels";
 import { ChatInput } from "./ChatInput";
 import { KakaoMap } from "./KakaoMap";
+import { NavigationCandidates } from "./NavigationCandidates";
 import "./JarvisFull.css";
 
 const CORE_TEXT: Record<JarvisState, { main: string; sub: string }> = {
@@ -12,6 +13,7 @@ const CORE_TEXT: Record<JarvisState, { main: string; sub: string }> = {
   processing: { main: "처리 중...", sub: "PROCESSING" },
   responded: { main: "응답 완료", sub: "DONE" },
   navigation_request: { main: "경로 검색 중", sub: "NAVIGATING" },
+  poi_request: { main: "주변 검색 중", sub: "POI SEARCH" },
 };
 
 const WAVE_BAR_COUNT = 24;
@@ -40,7 +42,7 @@ export function JarvisFull() {
   const clock = useClock();
   const micLevels = useMicLevels(status.currentState === "listening", WAVE_BAR_COUNT);
   const logRef = useRef<HTMLDivElement>(null);
-  const { clearNavigation } = status;
+  const { clearNavigation, clearPoi, clearPoiLayer, selectCandidate } = status;
 
   const coreText = CORE_TEXT[status.currentState];
 
@@ -150,6 +152,13 @@ export function JarvisFull() {
                 {turn.text}
               </div>
             ))}
+            {status.navigationCandidates && (
+              <NavigationCandidates
+                candidates={status.navigationCandidates}
+                onSelect={selectCandidate}
+                onCancel={clearNavigation}
+              />
+            )}
           </div>
 
           <ChatInput onSend={status.sendMessage} />
@@ -159,9 +168,13 @@ export function JarvisFull() {
       {/* position:fixed — 레이아웃 흐름 밖에서 플로팅 */}
       {status.navigationData && status.kakaoJsKey && (
         <KakaoMap
+          key={`${status.navigationData.destination.lat},${status.navigationData.destination.lng}-${status.navigationData.routeType}`}
           data={status.navigationData}
           jsKey={status.kakaoJsKey}
+          poiResults={status.poiResults}
           onClose={clearNavigation}
+          onClearPoi={clearPoi}
+          onClearPoiLayer={clearPoiLayer}
         />
       )}
     </div>

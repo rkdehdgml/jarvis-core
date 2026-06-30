@@ -359,6 +359,7 @@
 .kakao-map-canvas {
   position: absolute;
   inset: 0;
+  z-index: 0; /* 독립 스태킹 컨텍스트 — SDK 내부 요소가 info 패널을 덮지 못하게 함 */
 }
 
 /* 우하단 정보 오버레이 */
@@ -366,6 +367,7 @@
   position: absolute;
   bottom: 10px;
   right: 10px;
+  z-index: 1; /* kakao-map-canvas(z-index:0) 위에 표시 */
   background: rgba(3, 6, 12, 0.85);
   border: 1px solid #1a3a4a;
   border-radius: 6px;
@@ -412,6 +414,71 @@
 .kakao-map-info__taxi {
   font-size: 11px;
   color: #6a8a9a;
+}
+
+.kakao-map-info__poi-layers {
+  margin-top: 6px;
+  padding-top: 4px;
+  border-top: 1px solid #1a3a4a;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.kakao-map-info__poi {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: #2dd4ee;
+}
+
+.kakao-map-info__poi-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  flex-shrink: 0;
+}
+
+.kakao-map-info__poi-name {
+  flex: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.kakao-map-info__poi-clear {
+  background: none;
+  border: none;
+  color: #4a6a7a;
+  cursor: pointer;
+  font-size: 10px;
+  padding: 0 0 0 4px;
+  line-height: 1;
+  flex-shrink: 0;
+}
+
+.kakao-map-info__poi-clear:hover {
+  color: #e6f7fb;
+}
+
+.kakao-map-info__poi-clearall {
+  margin-top: 3px;
+  background: none;
+  border: 1px solid #1a3a4a;
+  border-radius: 3px;
+  color: #4a6a7a;
+  cursor: pointer;
+  font-size: 10px;
+  padding: 2px 6px;
+  text-align: center;
+  width: 100%;
+  font-family: inherit;
+}
+
+.kakao-map-info__poi-clearall:hover {
+  color: #e6f7fb;
+  border-color: #2dd4ee;
 }
 
 @media (prefers-reduced-motion: reduce) {
